@@ -436,7 +436,7 @@ lua_free_iface(struct gatekeeper_if *iface)
 	destroy_iface(iface, IFACE_DESTROY_LUA);
 }
 
-static int
+int
 get_ip_type(const char *ip_addr)
 {
 	int ret;
@@ -556,6 +556,18 @@ struct gatekeeper_if *
 get_if_back(struct net_config *net_conf)
 {
 	return net_conf->back_iface_enabled ? &net_conf->back : NULL;
+}
+
+bool
+ipv4_if_configured(struct gatekeeper_if *iface)
+{
+	return iface->configured_proto & GK_CONFIGURED_IPV4;
+}
+
+bool
+ipv6_if_configured(struct gatekeeper_if *iface)
+{
+	return iface->configured_proto & GK_CONFIGURED_IPV6;
 }
 
 int

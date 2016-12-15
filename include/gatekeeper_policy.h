@@ -16,20 +16,31 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef _GATEKEEPER_IPIP_H_
-#define _GATEKEEPER_IPIP_H_
+#ifndef _GATEKEEPER_POLICY_H_
+#define _GATEKEEPER_POLICY_H_
 
-#include <rte_ether.h>
+#include <netinet/in.h>
 
-#include "gatekeeper_flow.h"
+/* TODO Implement more policy actions. */
+enum policy_action {
+	/* Forward the packet to a Grantor server. */
+	GK_FWD_GT,
 
-struct ipip_tunnel_info {
-	struct ip_flow	     flow;
-	struct ether_addr    source_mac;
-	struct ether_addr    nexthop_mac;
+	/* Forward the packet to the back interface. */
+	GK_FWD_BCAK_NET,
+
+	/* Drop the packet. */
+	GK_DROP,
 };
 
-int encapsulate(struct rte_mbuf *pkt, uint8_t priority,
-	struct ipip_tunnel_info *info);
+struct simple_policy {
 
-#endif /* _GATEKEEPER_IPIP_H_ */
+	enum policy_action action;
+
+	/* Data that supports different policy actions. */
+	union {
+		int grantor_id;
+	} u;
+};
+
+#endif /* _GATEKEEPER_POLICY_H_ */

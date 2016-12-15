@@ -18,6 +18,7 @@
 
 #include <string.h>
 #include <stdbool.h>
+#include <arpa/inet.h>
 
 #include <rte_ip.h>
 #include <rte_log.h>
@@ -31,8 +32,6 @@
 #include "gatekeeper_gk.h"
 #include "gatekeeper_main.h"
 #include "gatekeeper_net.h"
-#include "gatekeeper_mailbox.h"
-#include "gatekeeper_ipip.h"
 #include "gatekeeper_config.h"
 
 #define	START_PRIORITY		 (38)
@@ -56,8 +55,9 @@
 
 /* Store information about a packet. */
 struct ipacket {
-	struct ip_flow  flow;
-	struct rte_mbuf *pkt;
+	struct ip_flow     flow;
+	struct rte_mbuf    *pkt;
+	struct gk_instance *instance;
 };
 
 struct flow_entry {
@@ -211,28 +211,68 @@ extract_packet_info(struct rte_mbuf *pkt, struct ipacket *packet)
 	return ret;
 }
 
-static inline void
-initialize_flow_entry(struct flow_entry *fe, struct ip_flow *flow)
+static struct simple_policy *
+get_dest_policy(struct gk_instance *instance, struct ip_flow *flow)
 {
-	rte_memcpy(&fe->flow, flow, sizeof(*flow));
+	int ret;
+	struct lpm_rt *lpm = instance->rt->lpm;
+	if (flow->proto == ETHER_TYPE_IPv4)
+		ret = lpm_rt_lookup_ipv4(lpm, flow->f.v4.dst);
+	else
+		ret = lpm_rt_lookup_ipv6(lpm, flow->f.v6.dst);
+	if (ret < 0)
+		return NULL;
+
+	return &instance->rt->policy_tbl[ret];
+}
+
+static inline void
+initialize_flow_entry(struct flow_entry *fe, struct ipacket *pkt)
+{
+	rte_memcpy(&fe->flow, &pkt->flow, sizeof(fe->flow));
 
 	fe->state = GK_REQUEST;
 	fe->u.request.last_packet_seen_at = rte_rdtsc();
 	fe->u.request.last_priority = START_PRIORITY;
 	fe->u.request.allowance = START_ALLOWANCE - 1;
-	/* TODO Grantor ID comes from LPM lookup. */
-	fe->u.request.grantor_id = 0;
+
+	/* Grantor ID comes from LPM lookup. */
+	if (fe->u.request.grantor_id == 0) {
+		struct simple_policy *policy = 
+			get_dest_policy(pkt->instance, &pkt->flow);
+		if (policy == NULL) {
+			RTE_LOG(ERR, GATEKEEPER,
+				"gk: initialize flow entry error in %s\n",
+				__func__);
+			return;
+		}
+
+		fe->u.request.grantor_id = policy->u.grantor_id;
+	}
 }
 
 static inline void
-reinitialize_flow_entry(struct flow_entry *fe, uint64_t now)
+reinitialize_flow_entry(
+	struct flow_entry *fe, struct ipacket *pkt, uint64_t now)
 {
+	struct simple_policy *policy;
+
 	fe->state = GK_REQUEST;
 	fe->u.request.last_packet_seen_at = now;
 	fe->u.request.last_priority = START_PRIORITY;
 	fe->u.request.allowance = START_ALLOWANCE - 1;
-	/* TODO Grantor ID comes from LPM lookup. */
-	fe->u.request.grantor_id = 0;
+
+	/* Grantor ID comes from LPM lookup. */
+	policy = get_dest_policy(pkt->instance, &pkt->flow);
+	if (policy == NULL) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: initialize flow entry error in %s\n",
+			__func__);
+		fe->u.request.grantor_id = 0;
+		return;
+	}
+
+	fe->u.request.grantor_id = policy->u.grantor_id;
 }
 
 static inline int
@@ -257,9 +297,9 @@ gk_process_request(struct flow_entry *fe, struct ipacket *packet)
 	uint8_t priority = priority_from_delta_time(now,
 			fe->u.request.last_packet_seen_at);
 
-	/* TODO The tunnel information should come from the LPM table. */
-	struct ipip_tunnel_info tunnel;
-	memset(&tunnel, 0, sizeof(tunnel));
+	/* The tunnel information should come from the LPM table. */
+	struct ipip_tunnel_info *tunnel =
+		&packet->instance->rt->tunnels[fe->u.request.grantor_id];
 
 	fe->u.request.last_packet_seen_at = now;
 
@@ -289,7 +329,7 @@ gk_process_request(struct flow_entry *fe, struct ipacket *packet)
 	/* The assigned priority is @priority. */
 
 	/* Encapsulate the packet as a request. */
-	ret = encapsulate(packet->pkt, priority, &tunnel);
+	ret = encapsulate(packet->pkt, priority, tunnel);
 	if (ret < 0)
 		return ret;
 
@@ -313,12 +353,12 @@ gk_process_granted(struct flow_entry *fe, struct ipacket *packet)
 	uint64_t now = rte_rdtsc();
 	struct rte_mbuf *pkt = packet->pkt;
 
-	/* TODO The tunnel information should come from the LPM table. */
-	struct ipip_tunnel_info tunnel;
-	memset(&tunnel, 0, sizeof(tunnel));
+	/* The tunnel information should come from the LPM table. */
+	struct ipip_tunnel_info *tunnel =
+		&packet->instance->rt->tunnels[fe->u.granted.grantor_id];
 
 	if (now >= fe->u.granted.cap_expire_at) {
-		reinitialize_flow_entry(fe, now);
+		reinitialize_flow_entry(fe, packet, now);
 		return gk_process_request(fe, packet);
 	}
 
@@ -343,7 +383,7 @@ gk_process_granted(struct flow_entry *fe, struct ipacket *packet)
 	 * mark it as a capability renewal request if @renew_cap is true,
 	 * enter destination according to @fe->u.granted.grantor_id.
 	 */
-	ret = encapsulate(packet->pkt, priority, &tunnel);
+	ret = encapsulate(packet->pkt, priority, tunnel);
 	if (ret < 0)
 		return ret;
 
@@ -358,7 +398,7 @@ gk_process_declined(struct flow_entry *fe, struct ipacket *packet)
 	uint64_t now = rte_rdtsc();
 
 	if (unlikely(now >= fe->u.declined.expire_at)) {
-		reinitialize_flow_entry(fe, now);
+		reinitialize_flow_entry(fe, packet, now);
 		return gk_process_request(fe, packet);
 	}
 
@@ -416,6 +456,12 @@ setup_gk_instance(unsigned int lcore_id, struct gk_config *gk_conf)
     	if (ret < 0)
         	goto flow_entry;
 
+	/*
+	 * The gk instance should only use the
+	 * LPM table that belongs to its socket.
+	 */
+	instance->rt= &gk_conf->rt[socket_id];
+
 	ret = 0;
 	goto out;
 
@@ -451,12 +497,18 @@ add_ggu_policy(struct ggu_policy *policy, struct gk_instance *instance)
 		}
 
 		fe = &instance->ip_flow_entry_table[ret];
-		initialize_flow_entry(fe, &policy->flow);
+		/*
+		 * It only fills up GK_GRANTED and GK_DECLINED states,
+		 * so, it doesn't need to call initialize_flow_entry().
+		 */
+		rte_memcpy(&fe->flow, &policy->flow, sizeof(fe->flow));
 	} else
 		fe = &instance->ip_flow_entry_table[ret];
 
 	switch(policy->state) {
-	case GK_GRANTED:
+	case GK_GRANTED: {
+		struct simple_policy *sp;
+
 		fe->state = GK_GRANTED;
 		fe->u.granted.cap_expire_at = now +
 			policy->params.u.granted.cap_expire_sec *
@@ -474,8 +526,19 @@ add_ggu_policy(struct ggu_policy *policy, struct gk_instance *instance)
 		fe->u.granted.budget_byte =
 			fe->u.granted.tx_rate_kb_cycle * 1024;
 
-		/* TODO Fill up the grantor id field. */
+		/* Grantor ID comes from LPM lookup. */
+		sp = get_dest_policy(instance, &fe->flow);
+		if (sp == NULL) {
+			RTE_LOG(ERR, GATEKEEPER,
+				"gk: initialize flow entry error in %s\n",
+				__func__);
+			fe->u.granted.grantor_id = 0;
+			return;
+		}
+
+		fe->u.granted.grantor_id = sp->u.grantor_id;
 		break;
+	}
 
 	case GK_DECLINED:
 		fe->state = GK_DECLINED;
@@ -596,35 +659,80 @@ gk_proc(void *arg)
 				continue;
 			}
 
+			packet.instance = instance;
 			/* 
 			 * Find the flow entry for the IP pair.
-			 * Create a new flow entry if not found.
+			 *
+			 * If the pair of source and destination addresses 
+			 * is in the flow table, proceed as the entry instructs,
+			 * and go to the next packet.
 			 */
 			ret = rte_hash_lookup_with_hash(
 				instance->ip_flow_hash_table,
 				&packet.flow, pkt->hash.rss);
-			if (ret < 0) {
-				/* Create a new flow entry. */
-				ret = rte_hash_add_key_with_hash(
-					instance->ip_flow_hash_table,
- 					(void *)&packet.flow, pkt->hash.rss);
-				if (ret < 0) {
-					RTE_LOG(ERR, HASH,
-						"The GK block failed to add new key to hash table!\n");
-					rte_pktmbuf_free(pkt);
+			if (ret == 0)
+				fe = &instance->ip_flow_entry_table[ret];
+			else {
+			 	/*
+				 * Otherwise, look up the destination address
+			 	 * in the global LPM table.
+				 */
+				struct simple_policy *policy = get_dest_policy(
+					instance, &packet.flow);
+
+			 	/*
+				 * No entry for the destination,
+				 * drop the packet.
+				 */
+				if (policy == NULL) {
+					drop_packet(pkt);
 					continue;
 				}
 
-				fe = &instance->ip_flow_entry_table[ret];
-				initialize_flow_entry(fe, &packet.flow);
-			} else
-				fe = &instance->ip_flow_entry_table[ret];
+				switch(policy->action) {
+				case GK_FWD_GT:
+					/*
+			 		 * The entry instructs to enforce
+					 * policies over its packets,
+			 		 * initialize an entry in the
+					 * flow table, proceed as the
+					 * brand-new entry instructs, and
+			 		 * go to the next packet.
+			 		 */
+					ret = rte_hash_add_key_with_hash(
+						instance->ip_flow_hash_table,
+ 						(void *)&packet.flow,
+						pkt->hash.rss);
+					if (ret < 0) {
+						RTE_LOG(ERR, HASH,
+						"The GK block failed to add new key to hash table!\n");
+						continue;
+					}
 
-			/*
-			 * 1.1 If the pair of source and destination addresses 
-			 * is in the flow table, proceed as the entry instructs,
-			 * and go to the next packet.
-			 */
+					fe = &instance->
+						ip_flow_entry_table[ret];
+					fe->u.request.grantor_id =
+						policy->u.grantor_id;
+					initialize_flow_entry(fe, &packet);
+					break;
+
+				case GK_FWD_BCAK_NET:
+			 		/*
+					 * The entry instructs to forward
+					 * its packets to the back interface,
+					 * forward accordingly.
+					 */
+					tx_bufs[num_tx++] = pkt;
+					continue;
+
+				case GK_DROP:
+					/* Fall through. */
+				default:
+					drop_packet(pkt);
+					continue;
+				}
+			}
+
 			switch(fe->state) {
 			case GK_REQUEST:
 				ret = gk_process_request(fe, &packet);
@@ -650,22 +758,6 @@ gk_proc(void *arg)
 				rte_pktmbuf_free(pkt);
 			else
 				tx_bufs[num_tx++] = pkt;
-
-			/*
-			 * TODO 1.2 Otherwise, look up the destination address
-			 * in the global LPM table.
-			 *
-			 * 1.2.1 If there is an entry for the destination and 
-			 * the entry instructs to enforce policies over its packets,
- 			 * initialize an entry in the flow table, proceed as the 
-			 * brand-new entry instructs, and go to the next packet.
-			 *
-			 * 1.2.2 If there is an entry for the destination and
-			 * the entry instructs to forward its packets to the
-			 * back interface, forward accordingly.
-			 *
-			 * 1.2.3 Otherwise, drop the packet.
-			 */
 		}
 
 		/* Send burst of TX packets, to second port of pair. */
@@ -717,8 +809,14 @@ cleanup_gk(struct gk_config *gk_conf)
 				ip_flow_entry_table);
 
                 destroy_mailbox(&gk_conf->instances[i].mb);
+
+		gk_conf->instances[i].rt = NULL;
 	}
 
+	for (i = 0; i < gk_conf->num_sockets; i++)
+		destroy_lpm_rt(gk_conf->rt[i].lpm);
+
+	rte_free(gk_conf->rt);
 	rte_free(gk_conf->instances);
 	rte_free(gk_conf);
 
@@ -736,6 +834,297 @@ gk_conf_put(struct gk_config *gk_conf)
 		return cleanup_gk(gk_conf);
 
 	return 0;
+}
+
+static int
+setup_gk_rt(struct gk_config *gk_conf, unsigned int num_sockets)
+{
+	int ret;
+	unsigned int i;
+	unsigned int num_succ_sockets = 0;
+	struct rte_lpm_config ipv4_lpm_config;
+	struct rte_lpm6_config ipv6_lpm_config;
+	struct gk_rt *rt;
+
+	gk_conf->num_sockets = num_sockets;
+
+	gk_conf->rt = rte_calloc("gk_rt",
+		gk_conf->num_sockets, sizeof(*gk_conf->rt), 0);
+	if (gk_conf->rt == NULL) {
+		ret = -1;
+		goto out;
+	}
+
+	ipv4_lpm_config.max_rules = gk_conf->max_num_ipv4_rules;
+	ipv4_lpm_config.number_tbl8s = gk_conf->num_ipv4_tbl8s;
+	ipv6_lpm_config.max_rules = gk_conf->max_num_ipv6_rules;
+	ipv6_lpm_config.number_tbl8s = gk_conf->num_ipv6_tbl8s;
+
+	for (i = 0; i < gk_conf->num_sockets; i++) {
+		rt = &gk_conf->rt[i];
+		rt->lpm = rte_calloc_socket(NULL, 1, sizeof(*rt->lpm), 0, i);
+		if (rt->lpm == NULL)
+			goto free_rt;
+
+		ret = init_lpm_rt("gk", &ipv4_lpm_config,
+			&ipv6_lpm_config, i, i, rt->lpm);
+		if (ret < 0)
+			goto free_lpm;
+
+		num_succ_sockets++;
+	}
+
+	goto out;
+
+free_lpm:
+	rte_free(rt->lpm);
+	rt->lpm = NULL;
+
+free_rt:
+	for (i = 0; i < num_succ_sockets; i++)
+		destroy_lpm_rt(gk_conf->rt[i].lpm);
+
+	rte_free(gk_conf->rt);
+	gk_conf->rt = NULL;
+
+out:
+	return ret;
+}
+
+static int
+lua_init_tunnels(
+	struct gk_config *gk_conf, unsigned int socket_id,
+	const char **gt_addrs, uint8_t num_gt_addrs)
+{
+	int i;
+	int ret;
+	struct gk_rt *rt = &gk_conf->rt[socket_id];
+
+	rt->num_tunnels = num_gt_addrs;
+
+	for (i = 0; i < num_gt_addrs; i++) {
+		struct in_addr gt_inaddr;
+		struct in6_addr gt_inaddr6;
+		int gt_type = get_ip_type(gt_addrs[i]);
+		if (gt_type == AF_INET) {
+			if (inet_pton(AF_INET,
+					gt_addrs[i], &gt_inaddr) != 1) {
+				ret = -1;
+				goto out;
+			}
+
+			if (!ipv4_if_configured(&gk_conf->net->back)) {
+				ret = -1;
+				goto out;
+			}
+
+			rt->tunnels[i].flow.proto = ETHER_TYPE_IPv4;
+			rt->tunnels[i].flow.f.v4.src =
+				gk_conf->net->back.ip4_addr.s_addr;
+			rt->tunnels[i].flow.f.v4.dst =
+				gt_inaddr.s_addr;
+		} else if (gt_type == AF_INET6) {
+			if (inet_pton(AF_INET6,
+					gt_addrs[i], &gt_inaddr6) != 1) {
+				ret = -1;
+				goto out;
+			}
+
+			if (!ipv6_if_configured(&gk_conf->net->back)) {
+				ret = -1;
+				goto out;
+			}
+
+			rt->tunnels[i].flow.proto = ETHER_TYPE_IPv6;
+			rte_memcpy(rt->tunnels[i].flow.f.v6.src,
+				gk_conf->net->back.ip6_addr.s6_addr,
+				sizeof(rt->tunnels[i].flow.f.v6.src));
+			rte_memcpy(rt->tunnels[i].flow.f.v6.dst,
+				gt_inaddr6.s6_addr,
+				sizeof(rt->tunnels[i].flow.f.v6));
+		} else {
+			ret = -1;
+			goto out;
+		}
+
+		ether_addr_copy(&gk_conf->net->back.eth_addr,
+			&rt->tunnels[i].source_mac);
+
+		/* TODO The MAC addresses must come from the LLS block. */
+	}
+
+	ret = 0;
+out:
+	return ret;
+}
+
+static int
+add_rt_policy(struct gk_rt *rt,
+	struct lua_gk_policy *policies, unsigned int num_policies)
+{
+	unsigned int i;
+
+	rt->num_policies = num_policies;
+	for (i = 0; i < num_policies; i++) {
+		struct simple_policy *ptr =
+			&rt->policy_tbl[policies[i].policy_id];
+		ptr->action = policies[i].action;
+
+		switch(ptr->action) {
+		case GK_FWD_GT:
+			ptr->u.grantor_id = policies[i].grantor_id;
+			continue;
+
+		case GK_FWD_BCAK_NET:
+			/* Fall through. */
+		case GK_DROP:
+			/* Do nothing. */
+			continue;
+
+		default:
+			RTE_LOG(ERR, GATEKEEPER,
+				"Unknown policy action %u\n",
+				ptr->action);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+int
+lua_init_gk_rt(
+	struct gk_config *gk_conf, struct net_config *net_conf,
+	struct lua_ip_routes *routes, unsigned int num_routes,
+	struct lua_gk_policy *policies, unsigned int num_policies,
+	const char **grantor_addrs, unsigned int num_grantors)
+{
+	int ret = 0;
+	unsigned int i;
+	unsigned int num_sockets = net_conf->numa_nodes;
+	int num_ipv4_routes = 0;
+	int num_ipv6_routes = 0;
+	struct ipv4_lpm_route *ipv4_routes;
+	struct ipv6_lpm_route *ipv6_routes;
+
+	gk_conf->net = net_conf;
+
+	/* Set up the gk routing table. */
+	ret = setup_gk_rt(gk_conf, num_sockets);
+	if (ret < 0)
+		goto out;
+
+	ipv4_routes = rte_calloc(NULL,
+		gk_conf->max_num_ipv4_rules,
+		sizeof(*ipv4_routes), 0);
+	if (ipv4_routes == NULL) {
+		ret = -1;
+		goto free_lpm;
+	}
+
+	ipv6_routes = rte_calloc(NULL,
+		gk_conf->max_num_ipv6_rules,
+		sizeof(*ipv6_routes), 0);
+	if (ipv6_routes == NULL) {
+		ret = -1;
+		goto free_ipv4_routes;
+	}
+
+	/* Parse all the routes. */
+	for (i = 0; i < num_routes; i++) {
+		struct in_addr ipv4_addr;
+		struct in6_addr ipv6_addr;
+		int ip_type = get_ip_type(routes[i].ip_addr);
+		if (ip_type == AF_INET) {
+			if (inet_pton(AF_INET,
+					routes[i].ip_addr, &ipv4_addr) != 1) {
+				ret = -1;
+				goto free_ipv6_routes;
+			}
+
+			ipv4_routes[num_ipv4_routes].ip =
+				ipv4_addr.s_addr;
+			ipv4_routes[num_ipv4_routes].depth =
+				routes[i].prefix_len;
+			ipv4_routes[num_ipv4_routes].policy_id =
+				routes[i].policy_id;
+			num_ipv4_routes++;
+		} else if (ip_type == AF_INET6) {
+			if (inet_pton(AF_INET6,
+					routes[i].ip_addr, &ipv6_addr) != 1) {
+				ret = -1;
+				goto free_ipv6_routes;
+			}
+
+			rte_memcpy(ipv6_routes[num_ipv6_routes].ip,
+				ipv6_addr.s6_addr,
+				sizeof(ipv6_routes[num_ipv6_routes].ip));
+			ipv6_routes[num_ipv6_routes].depth =
+				routes[i].prefix_len;
+			ipv6_routes[num_ipv6_routes].policy_id =
+				routes[i].policy_id;
+			num_ipv6_routes++;
+		} else {
+			ret = -1;
+			goto free_ipv6_routes;
+		}
+	}
+
+	/* Add IP routes to the LPM table. */
+	for (i = 0; i < num_sockets; i++) {
+		/* Set up the IPv4 routes. */
+		ret = lpm_rt_add_ipv4_routes(
+			gk_conf->rt[i].lpm, ipv4_routes, num_ipv4_routes);
+		if (ret < 0)
+			goto free_ipv6_routes;
+
+		/* Set up the IPv6 routes. */
+		ret = lpm_rt_add_ipv6_routes(
+			gk_conf->rt[i].lpm, ipv6_routes, num_ipv6_routes);
+		if (ret < 0)
+			goto free_ipv6_routes;
+	}
+
+	/* Add policies to the routing table. */
+	for (i = 0; i < num_sockets; i++) {
+		ret = add_rt_policy(&gk_conf->rt[i],
+			policies, num_policies);
+		if (ret < 0)
+			goto free_ipv6_routes;
+	}
+
+	/* Initialize the tunnels' information. */
+	for (i = 0; i < num_sockets; i++) {
+		ret = lua_init_tunnels(gk_conf, i,
+			grantor_addrs, num_grantors);
+		if (ret < 0)
+			goto free_ipv6_routes;
+	}
+
+	/* Before exiting this function, needs to free the routes. */
+	rte_free(ipv4_routes);
+	rte_free(ipv6_routes);
+
+	ret = 0;
+	goto out;
+
+free_ipv6_routes:
+	rte_free(ipv6_routes);
+
+free_ipv4_routes:
+	rte_free(ipv4_routes);
+
+free_lpm:
+	for (i = 0; i < gk_conf->num_sockets; i++)
+		destroy_lpm_rt(gk_conf->rt[i].lpm);
+
+	rte_free(gk_conf->rt);
+	gk_conf->rt = NULL;
+
+	rte_free(gk_conf);
+
+out:
+	return ret;
 }
 
 int
@@ -759,8 +1148,6 @@ run_gk(struct net_config *net_conf, struct gk_config *gk_conf)
 		goto out;
 	}
 
-	gk_conf->net = net_conf;
-
 	num_lcores = gk_conf->lcore_end_id - gk_conf->lcore_start_id + 1;
 	RTE_ASSERT(num_lcores <= GK_MAX_NUM_LCORES);
 
@@ -780,7 +1167,7 @@ run_gk(struct net_config *net_conf, struct gk_config *gk_conf)
 		if (ret < 0) {
 			RTE_LOG(ERR, GATEKEEPER, "gk: cannot assign an RX queue for the front interface for lcore %u\n",
 				lcore);
-			goto out;
+			goto instances;
 		}
 		inst_ptr->rx_queue_front = (uint16_t)ret;
 
@@ -788,7 +1175,7 @@ run_gk(struct net_config *net_conf, struct gk_config *gk_conf)
 		if (ret < 0) {
 			RTE_LOG(ERR, GATEKEEPER, "gk: cannot assign a TX queue for the back interface for lcore %u\n",
 				lcore);
-			goto out;
+			goto instances;
 		}
 		inst_ptr->tx_queue_back = (uint16_t)ret;
 	}
@@ -809,14 +1196,14 @@ run_gk(struct net_config *net_conf, struct gk_config *gk_conf)
 		if (ret) {
 			RTE_LOG(ERR, EAL, "lcore %u failed to launch GK\n", i);
 			ret = -1;
-			goto instance;
+			goto launch;
 		}
 	}
 
 	ret = 0;
 	goto out;
 
-instance:
+launch:
 	/* GK instance at lcore @i failed to launch. */
 	inst_ptr = &gk_conf->instances[i - gk_conf->lcore_start_id];
 	
@@ -831,17 +1218,32 @@ instance:
 setup:
 	/*
 	 * If failed to setup the first gk instance, needs to release
-	 * 'gk_conf->instances' and 'gk_conf'.
+	 * 'gk_conf->instances', 'gk_conf->lpm' and 'gk_conf'.
 	 * Otherwise, the launched gk instances need to call
 	 * gk_conf_put() to release.
+	 *
+	 * i == gk_conf->lcore_start_id indicates
+	 * GK has not set up the first instance yet.
 	 */
-	if (i == gk_conf->lcore_start_id) {
-		rte_free(gk_conf->instances);
-		gk_conf->instances = NULL;
+	if (i != gk_conf->lcore_start_id)
+		goto out;
 
-		rte_free(gk_conf);
-		gk_conf = NULL;
-	}
+instances:
+	rte_free(gk_conf->instances);
+	gk_conf->instances = NULL;
+
+	/* Also needs to release the data structures for LPM. */
+	for (i = 0; i < gk_conf->num_sockets; i++)
+		destroy_lpm_rt(&gk_conf->rt->lpm[i]);
+
+	rte_free(gk_conf->rt->lpm);
+	gk_conf->rt->lpm = NULL;
+
+	rte_free(gk_conf->rt);
+	gk_conf->rt = NULL;
+
+	rte_free(gk_conf);
+
 out:
 	return ret;
 }
