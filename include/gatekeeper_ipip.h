@@ -33,4 +33,7 @@ struct ipip_tunnel_info {
 int encapsulate(struct rte_mbuf *pkt, uint8_t priority,
 	struct ipip_tunnel_info *info);
 
+int decapsulate(struct rte_mbuf *pkt, uint8_t *priority,
+	struct ipip_tunnel_info *info);
+
 #endif /* _GATEKEEPER_IPIP_H_ */

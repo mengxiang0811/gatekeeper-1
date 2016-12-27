@@ -171,14 +171,16 @@ gt_proc(void *arg)
 
 		for (i = 0; i < num_rx; i++) {
 			int ret;
+			uint8_t priority;
 			uint8_t inner_ip_ver = 4;
 			struct rte_mbuf *m = rx_bufs[i];
 			void *ip_hdr;
 			struct ggu_policy policy;
+			struct ipip_tunnel_info tunnel;
 			struct ether_hdr *new_eth;
 
 			/*
-			 * TODO Decapsulate the packets.
+			 * Decapsulate the packets.
 			 *
 			 * Only request packets and priority packets
 			 * with capabilities about to expire go through a
@@ -186,7 +188,11 @@ gt_proc(void *arg)
 			 *
 			 * Other packets will be fowarded directly.
 			 */
-			rte_pktmbuf_adj(m, sizeof(struct ether_hdr));
+			ret = decapsulate(m, &priority, &tunnel);
+			if (ret < 0) {
+				rte_pktmbuf_free(m);
+				continue;
+			}
 
 			ip_hdr = get_ip_hdr(m, &inner_ip_ver);
 			if (ip_hdr == NULL) {
@@ -214,6 +220,11 @@ gt_proc(void *arg)
 			else
 				new_eth->ether_type =
 					rte_cpu_to_be_16(ETHER_TYPE_IPv6);
+
+			if (priority <= 1) {
+				tx_bufs[num_tx++] = m;
+				continue;
+			}
 
 			/*
 			 * Lookup the policy decision.
