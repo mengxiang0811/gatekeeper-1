@@ -131,3 +131,67 @@ encapsulate(struct rte_mbuf *pkt, uint8_t priority,
 
 	return 0;
 }
+
+int
+decapsulate(struct rte_mbuf *pkt, uint8_t *priority,
+	struct ipip_tunnel_info *info)
+{
+	uint16_t ethertype;
+	uint8_t l4_proto;
+	uint16_t outer_header_len = 0;
+	struct ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt, struct ether_hdr *);
+	struct ipv4_hdr *ipv4_hdr;
+	struct ipv6_hdr *ipv6_hdr;
+
+	outer_header_len += sizeof(struct ether_hdr);
+	ethertype = rte_be_to_cpu_16(eth_hdr->ether_type);
+
+	switch (ethertype) {
+	case ETHER_TYPE_IPv4:
+		ipv4_hdr = (struct ipv4_hdr *)
+			((char *)eth_hdr + outer_header_len);
+		outer_header_len += sizeof(struct ipv4_hdr);
+		*priority = (ipv4_hdr->type_of_service >> 2);
+		l4_proto = ipv4_hdr->next_proto_id;
+		if (*priority >= 2) {
+			info->flow.proto = ETHER_TYPE_IPv4;
+			info->flow.f.v4.src = ipv4_hdr->src_addr;
+			info->flow.f.v4.dst = ipv4_hdr->dst_addr;
+		}
+		break;
+	case ETHER_TYPE_IPv6:
+		ipv6_hdr = (struct ipv6_hdr *)
+			((char *)eth_hdr + outer_header_len);
+		*priority = (((ipv6_hdr->vtc_flow >> 20) & 0xFF) >> 2);
+		outer_header_len += sizeof(struct ipv6_hdr);
+		l4_proto = ipv6_hdr->proto;
+		if (*priority >= 2) {
+			info->flow.proto = ETHER_TYPE_IPv6;
+			rte_memcpy(info->flow.f.v6.src,
+				ipv6_hdr->src_addr,
+				sizeof(info->flow.f.v6.src));
+			rte_memcpy(info->flow.f.v6.dst,
+				ipv6_hdr->dst_addr,
+				sizeof(info->flow.f.v6.dst));
+		}
+		break;
+	default:
+		l4_proto = 0;
+		*priority = 0;
+		outer_header_len += sizeof(struct ipv6_hdr);
+		info->flow.proto = ethertype;
+		break;
+	}
+
+	if (l4_proto != IPPROTO_IPIP)
+		return -1;
+
+	if (*priority >= 2) {
+		ether_addr_copy(&eth_hdr->s_addr, &info->source_mac);
+		ether_addr_copy(&eth_hdr->d_addr, &info->nexthop_mac);
+	}
+
+	rte_pktmbuf_adj(pkt, outer_header_len);
+
+	return 0;
+}

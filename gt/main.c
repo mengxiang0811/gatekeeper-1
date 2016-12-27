@@ -87,7 +87,6 @@ extract_packet_fields(struct rte_mbuf *m, struct gt_packet_fields *fields)
 	return 0;
 }
 
-/* TODO Add the source address of the outer IP header. */
 static int
 lookup_policy_decision(struct gt_packet_fields *fields, unsigned lcore_id,
 	struct ggu_policy *policy, struct gt_instance *instance)
@@ -157,13 +156,15 @@ gt_proc(void *arg)
 
 		for (i = 0; i < num_rx; i++) {
 			int ret;
+			uint8_t priority;
 			struct rte_mbuf *m = rx_bufs[i];
 			struct gt_packet_fields fields;
 			struct ggu_policy policy;
+			struct ipip_tunnel_info tunnel;
 			struct ether_hdr *new_eth;
 
 			/*
-			 * TODO Decapsulate the packets.
+			 * Decapsulate the packets.
 			 *
 			 * Only request packets and priority packets
 			 * with capabilities about to expire go through a
@@ -171,7 +172,21 @@ gt_proc(void *arg)
 			 *
 			 * Other packets will be fowarded directly.
 			 */
-			rte_pktmbuf_adj(m, sizeof(struct ether_hdr));
+			ret = decapsulate(m, &priority, &tunnel);
+			if (ret < 0) {
+				rte_pktmbuf_free(m);
+				continue;
+			}
+
+			fields.outer_ip_ver = tunnel.flow.proto;
+			if (fields.outer_ip_ver == ETHER_TYPE_IPv4)
+				fields.gatekeeper_server_ip.v4 =
+					tunnel.flow.f.v4.src;
+			else if (fields.outer_ip_ver == ETHER_TYPE_IPv6)
+				rte_memcpy(fields.gatekeeper_server_ip.v6,
+					tunnel.flow.f.v6.src,
+					sizeof(fields.gatekeeper_server_ip.
+					v6));
 
 			ret = extract_packet_fields(m, &fields);
 			if (ret < 0) {
@@ -198,6 +213,11 @@ gt_proc(void *arg)
 
 			new_eth->ether_type =
 				rte_cpu_to_be_16(fields.inner_ip_ver);
+
+			if (priority <= 1) {
+				tx_bufs[num_tx++] = m;
+				continue;
+			}
 
 			/*
 			 * Lookup the policy decision.
