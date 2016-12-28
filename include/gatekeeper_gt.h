@@ -23,7 +23,15 @@
 
 #include <rte_atomic.h>
 
+#include "gatekeeper_lpm.h"
 #include "gatekeeper_config.h"
+
+/* Structure for Lua to set up the LPM routes. */
+struct lua_ip_routes {
+        const char *ip_addr;
+        uint8_t    prefix_len;
+        uint8_t    policy_id;
+};
 
 struct gt_match_fields {
 	union {
@@ -70,6 +78,10 @@ struct gt_config {
 struct gt_config *alloc_gt_conf(void);
 int gt_conf_put(struct gt_config *gt_conf);
 int run_gt(struct net_config *net_conf, struct gt_config *gt_conf);
+int lua_update_ipv4_lpm(struct rte_lpm *lpm,
+	struct lua_ip_routes *routes, unsigned int num_routes);
+int lua_update_ipv6_lpm(struct rte_lpm6 *lpm,
+	struct lua_ip_routes *routes, unsigned int num_routes);
 
 static inline void
 gt_conf_hold(struct gt_config *gt_conf)

@@ -149,6 +149,12 @@ struct gt_config {
 	/* This struct has hidden fields. */
 };
 
+struct lua_ip_routes {
+        const char *ip_addr;
+        uint8_t    prefix_len;
+        uint8_t    policy_id;
+};
+
 struct gt_match_fields {
 	union {
 		uint32_t v4;
@@ -194,6 +200,38 @@ struct ggu_policy {
 	}__attribute__((packed)) params;
 };
 
+struct ipv4_lpm_route {
+	uint32_t ip;
+	uint8_t  depth;
+	uint8_t  policy_id;
+};
+
+struct ipv6_lpm_route {
+	uint8_t ip[16];
+	uint8_t depth;
+	uint8_t policy_id;
+};
+
+struct rte_lpm_config {
+	uint32_t max_rules;
+	uint32_t number_tbl8s;
+	int flags;
+};
+
+struct rte_lpm6_config {
+	uint32_t max_rules;
+	uint32_t number_tbl8s;
+	int flags;
+};
+
+struct rte_lpm {
+	/* This struct has hidden fields. */
+};
+
+struct rte_lpm6 {
+	/* This struct has hidden fields. */
+};
+
 ]]
 
 -- Functions and wrappers
@@ -222,6 +260,24 @@ int run_lls(struct net_config *net_conf, struct lls_config *lls_conf);
 
 struct gt_config *alloc_gt_conf(void);
 int run_gt(struct net_config *net_conf, struct gt_config *gt_conf);
+int lua_update_ipv4_lpm(struct rte_lpm *lpm,
+	struct lua_ip_routes *routes, unsigned int num_routes);
+int lua_update_ipv6_lpm(struct rte_lpm6 *lpm,
+	struct lua_ip_routes *routes, unsigned int num_routes);
+
+struct rte_lpm *init_ipv4_lpm(const char *tag,
+	const struct rte_lpm_config *lpm_conf,
+	unsigned int socket_id, unsigned int lcore, unsigned int identifier);
+int lpm_add_ipv4_routes(struct rte_lpm *lpm,
+	struct ipv4_lpm_route *routes, unsigned int num_routes);
+int lpm_lookup_ipv4(struct rte_lpm *lpm, uint32_t ip);
+
+struct rte_lpm6 *init_ipv6_lpm(const char *tag,
+	const struct rte_lpm6_config *lpm6_conf,
+	unsigned int socket_id, unsigned int lcore, unsigned int identifier);
+int lpm_add_ipv6_routes(struct rte_lpm6 *lpm,
+	struct ipv6_lpm_route *routes, unsigned int num_routes);
+int lpm_lookup_ipv6(struct rte_lpm6 *lpm, uint8_t *ip);
 
 ]]
 

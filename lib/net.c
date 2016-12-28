@@ -437,7 +437,7 @@ lua_free_iface(struct gatekeeper_if *iface)
 	destroy_iface(iface, IFACE_DESTROY_LUA);
 }
 
-static int
+int
 get_ip_type(const char *ip_addr)
 {
 	int ret;
