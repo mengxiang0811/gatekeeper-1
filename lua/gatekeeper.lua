@@ -99,6 +99,19 @@ local ffi = require("ffi")
 -- Structs
 ffi.cdef[[
 
+enum gk_flow_state {
+	GK_REQUEST,
+	GK_GRANTED,
+	GK_DECLINED
+};
+
+enum protocols {
+	TCP = 6,
+	UDP = 17,
+	IPV4 = 0x0800,
+	IPV6 = 0x86DD,
+};
+
 struct gatekeeper_if {
 	char     **pci_addrs;
 	uint8_t  num_ports;
@@ -134,6 +147,51 @@ struct lls_config {
 
 struct gt_config {
 	/* This struct has hidden fields. */
+};
+
+struct gt_match_fields {
+	union {
+		uint32_t v4;
+		uint8_t  v6[16];
+	} ip;
+	uint16_t proto;
+	uint16_t dest_port;
+};
+
+struct ip_flow {
+	uint16_t proto;
+
+	union {
+		struct {
+			uint32_t src;
+			uint32_t dst;
+		} v4;
+
+		struct {
+			uint8_t src[16];
+			uint8_t dst[16];
+		} v6;
+	} f;
+};
+
+struct ggu_policy {
+	uint8_t  state;
+	struct ip_flow flow;
+
+	struct {
+		union {
+			struct {
+				uint32_t tx_rate_kb_sec;
+				uint32_t cap_expire_sec;
+				uint32_t next_renewal_ms;
+				uint32_t renewal_step_ms;
+			} granted;
+
+			struct {
+				uint32_t expire_sec;
+			} declined;
+		} u;
+	}__attribute__((packed)) params;
 };
 
 ]]

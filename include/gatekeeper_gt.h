@@ -23,6 +23,17 @@
 
 #include <rte_atomic.h>
 
+#include "gatekeeper_config.h"
+
+struct gt_match_fields {
+	union {
+		uint32_t v4;
+		uint8_t  v6[16];
+	} ip;
+	uint16_t proto;
+	uint16_t dest_port;
+};
+
 /* Structures for each GT instance. */
 struct gt_instance {
 	/* RX queue on the front interface. */
@@ -30,6 +41,9 @@ struct gt_instance {
 
 	/* TX queue on the front interface. */
 	uint16_t      tx_queue;
+
+	/* The lua state that belongs to the instance. */
+	lua_State     *lua_state;
 };
 
 /* Configuration for the GT functional block. */
