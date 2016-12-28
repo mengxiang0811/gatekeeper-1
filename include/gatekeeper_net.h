@@ -163,6 +163,7 @@ int lua_init_iface(struct gatekeeper_if *iface, const char *iface_name,
 	const char **pci_addrs, uint8_t num_pci_addrs,
 	const char **ip_addrs, uint8_t num_ip_addrs);
 void lua_free_iface(struct gatekeeper_if *iface);
+int get_ip_type(const char *ip_addr);
 
 int ethertype_filter_add(uint8_t port_id, uint16_t ether_type,
 	uint16_t queue_id);

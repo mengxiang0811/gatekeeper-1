@@ -3,6 +3,7 @@ local ffi = require("ffi")
 
 local policy_names = {
 	"simple_policy",
+	"lpm_policy",
 }
 
 local default = {
@@ -16,12 +17,16 @@ local default = {
 }
 
 GLOBAL_POLICIES = {}
-for key, value in ipairs(policy_names) do
-	local policy_module = require(value)
-	local policies = policy_module.setup_policy()
 
-	if policies ~= nil then
-		GLOBAL_POLICIES[value] = policies
+function setup_policy(socket, lcore)
+
+	for key, value in ipairs(policy_names) do
+		local policy_module = require(value)
+		local policies = policy_module.setup_policy(socket, lcore)
+
+		if policies ~= nil then
+			GLOBAL_POLICIES[value] = policies
+		end
 	end
 end
 

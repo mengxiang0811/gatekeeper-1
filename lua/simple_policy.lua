@@ -14,7 +14,7 @@ including speed limit, expiration time, actions - DENY or ACCEPT, etc.
 --]]
 
 -- Function that set up the simple policy.
-function M.setup_policy()
+function M.setup_policy(socket, lcore)
 
 	local IPV4 = policylib.c.IPV4
 

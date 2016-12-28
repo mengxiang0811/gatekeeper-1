@@ -325,6 +325,18 @@ config_gt_instance(struct gt_config *gt_conf, unsigned int lcore_id)
 		goto free_lua_state;
 	}
 
+	/* Function to be called. */
+	lua_getglobal(instance->lua_state, "setup_policy");
+	lua_pushinteger(instance->lua_state, rte_lcore_to_socket_id(lcore_id));
+	lua_pushinteger(instance->lua_state, lcore_id);
+	ret = lua_pcall(instance->lua_state, 2, 0, 0);
+	if (ret != 0) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gt: %s!\n", lua_tostring(instance->lua_state, -1));
+		ret = -1;
+		goto free_lua_state;
+	}
+
 	goto out;
 
 free_lua_state:
@@ -464,4 +476,112 @@ out:
 success:
 	rte_atomic32_init(&gt_conf->ref_cnt);
 	return 0;
+}
+
+int
+lua_update_ipv4_lpm(struct rte_lpm *lpm,
+	struct lua_ip_routes *routes, unsigned int num_routes)
+{
+	/* TODO Support Add/Delete routing entries. */
+
+	int ret;
+	unsigned int i;
+	int num_ipv4_routes = 0;
+	struct ipv4_lpm_route *ipv4_routes;
+
+	ipv4_routes = rte_calloc(NULL, num_routes, sizeof(*ipv4_routes), 0);
+	if (ipv4_routes == NULL) {
+		ret = -1;
+		goto out;
+	}
+
+	/* Parse all the routes. */
+	for (i = 0; i < num_routes; i++) {
+		struct in_addr ipv4_addr;
+		int ip_type = get_ip_type(routes[i].ip_addr);
+		if (ip_type == AF_INET) {
+			if (inet_pton(AF_INET,
+					routes[i].ip_addr, &ipv4_addr) != 1) {
+				ret = -1;
+				goto free_ipv4_routes;
+			}
+
+			ipv4_routes[num_ipv4_routes].ip =
+				ipv4_addr.s_addr;
+			ipv4_routes[num_ipv4_routes].depth =
+				routes[i].prefix_len;
+			ipv4_routes[num_ipv4_routes].policy_id =
+				routes[i].policy_id;
+			num_ipv4_routes++;
+		} else {
+			ret = -1;
+			goto free_ipv4_routes;
+		}
+	}
+
+	/* Update the IPv4 routes. */
+	ret = lpm_add_ipv4_routes(lpm, ipv4_routes, num_ipv4_routes);
+	if (ret < 0)
+		goto free_ipv4_routes;
+
+	ret = 0;
+
+free_ipv4_routes:
+	rte_free(ipv4_routes);
+
+out:
+	return ret;
+}
+
+int
+lua_update_ipv6_lpm(struct rte_lpm6 *lpm,
+	struct lua_ip_routes *routes, unsigned int num_routes)
+{
+	int ret;
+	unsigned int i;
+	int num_ipv6_routes = 0;
+	struct ipv6_lpm_route *ipv6_routes;
+
+	ipv6_routes = rte_calloc(NULL, num_routes, sizeof(*ipv6_routes), 0);
+	if (ipv6_routes == NULL) {
+		ret = -1;
+		goto out;
+	}
+
+	/* Parse all the routes. */
+	for (i = 0; i < num_routes; i++) {
+		struct in6_addr ipv6_addr;
+		int ip_type = get_ip_type(routes[i].ip_addr);
+		if (ip_type == AF_INET6) {
+			if (inet_pton(AF_INET6,
+					routes[i].ip_addr, &ipv6_addr) != 1) {
+				ret = -1;
+				goto free_ipv6_routes;
+			}
+
+			rte_memcpy(ipv6_routes[num_ipv6_routes].ip,
+				ipv6_addr.s6_addr,
+				sizeof(ipv6_routes[num_ipv6_routes].ip));
+			ipv6_routes[num_ipv6_routes].depth =
+				routes[i].prefix_len;
+			ipv6_routes[num_ipv6_routes].policy_id =
+				routes[i].policy_id;
+			num_ipv6_routes++;
+		} else {
+			ret = -1;
+			goto free_ipv6_routes;
+		}
+	}
+
+	ret = lpm_add_ipv6_routes(lpm, ipv6_routes, num_ipv6_routes);
+	if (ret < 0)
+		goto free_ipv6_routes;
+
+	ret = 0;
+
+free_ipv6_routes:
+	rte_free(ipv6_routes);
+
+out:
+	return ret;
 }
