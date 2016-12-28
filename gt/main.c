@@ -16,14 +16,26 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <arpa/inet.h>
+#include <lualib.h>
+#include <lauxlib.h>
+
 #include <rte_log.h>
+#include <rte_ether.h>
 #include <rte_lcore.h>
 #include <rte_malloc.h>
 
+#include "gatekeeper_ggu.h"
+#include "gatekeeper_ipip.h"
+#include "gatekeeper_gk.h"
 #include "gatekeeper_gt.h"
 #include "gatekeeper_main.h"
 #include "gatekeeper_net.h"
 #include "gatekeeper_launch.h"
+
+/* TODO Get the install-path via Makefile. */
+#define LUA_POLICY_BASE_DIR "./lua"
+#define GRANTOR_CONFIG_FILE "policy.lua"
 
 static int
 get_block_idx(struct gt_config *gt_conf, unsigned int lcore_id)
@@ -51,6 +63,67 @@ gt_setup_rss(struct gt_config *gt_conf)
 }
 
 static int
+extract_packet_fields(struct rte_mbuf *m, struct gt_packet_fields *fields)
+{
+	struct ipv4_hdr *ip4_hdr = rte_pktmbuf_mtod(m, struct ipv4_hdr *);
+	uint8_t inner_ip_ver = (ip4_hdr->version_ihl & 0xF0) >> 4;
+	fields->l3_hdr = ip4_hdr;
+
+	if (inner_ip_ver == 4) {
+		fields->inner_ip_ver = ETHER_TYPE_IPv4;
+		fields->l4_proto = ip4_hdr->next_proto_id;
+		fields->l4_hdr = &ip4_hdr[1];
+	} else if (inner_ip_ver == 6) {
+		struct ipv6_hdr *ip6_hdr =
+			rte_pktmbuf_mtod(m, struct ipv6_hdr *);
+		fields->inner_ip_ver = ETHER_TYPE_IPv6;
+		fields->l4_proto = ip6_hdr->proto;
+		fields->l4_hdr = &ip6_hdr[1];
+	} else {
+		fields->inner_ip_ver = inner_ip_ver;
+		return -1;
+	}
+
+	return 0;
+}
+
+/* TODO Add the source address of the outer IP header. */
+static int
+lookup_policy_decision(struct gt_packet_fields *fields, unsigned lcore_id,
+	struct ggu_policy *policy, struct gt_instance *instance)
+{
+	policy->flow.proto = fields->inner_ip_ver;
+	if (fields->inner_ip_ver == ETHER_TYPE_IPv4) {
+		struct ipv4_hdr *ip4_hdr = (struct ipv4_hdr *)fields->l3_hdr;
+
+		policy->flow.f.v4.src = ip4_hdr->src_addr;
+		policy->flow.f.v4.dst = ip4_hdr->dst_addr;
+	} else if (likely(fields->inner_ip_ver == ETHER_TYPE_IPv6)) {
+		struct ipv6_hdr *ip6_hdr = (struct ipv6_hdr *)fields->l3_hdr;
+
+		rte_memcpy(policy->flow.f.v6.src, ip6_hdr->src_addr,
+			sizeof(policy->flow.f.v6.src));
+		rte_memcpy(policy->flow.f.v6.dst, ip6_hdr->dst_addr,
+			sizeof(policy->flow.f.v6.dst));
+	} else
+		rte_panic("Unexpected condition: gt block at lcore %u lookups policy decision for an non-IP packet!\n",
+			lcore_id);
+
+	lua_getglobal(instance->lua_state, "lookup_policy");
+	lua_pushlightuserdata(instance->lua_state, fields);
+	lua_pushlightuserdata(instance->lua_state, policy);
+
+	if (lua_pcall(instance->lua_state, 2, 0, 0) != 0) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gt: error running function `lookup_policy': %s, at lcore %u\n",
+			lua_tostring(instance->lua_state, -1), lcore_id);
+		return -1;
+	}
+
+	return 0;
+}
+
+static int
 gt_proc(void *arg)
 {
 	unsigned int lcore = rte_lcore_id();
@@ -70,8 +143,10 @@ gt_proc(void *arg)
 	while (likely(!exiting)) {
 		int i;
 		uint16_t num_rx;
+		uint16_t num_tx = 0;
 		uint16_t num_tx_succ;
 		struct rte_mbuf *rx_bufs[GATEKEEPER_MAX_PKT_BURST];
+		struct rte_mbuf *tx_bufs[GATEKEEPER_MAX_PKT_BURST];
 
 		/* Load a set of packets from the front NIC. */
 		num_rx = rte_eth_rx_burst(port, rx_queue, rx_bufs,
@@ -81,6 +156,12 @@ gt_proc(void *arg)
 			continue;
 
 		for (i = 0; i < num_rx; i++) {
+			int ret;
+			struct rte_mbuf *m = rx_bufs[i];
+			struct gt_packet_fields fields;
+			struct ggu_policy policy;
+			struct ether_hdr *new_eth;
+
 			/*
 			 * TODO Decapsulate the packets.
 			 *
@@ -90,30 +171,71 @@ gt_proc(void *arg)
 			 *
 			 * Other packets will be fowarded directly.
 			 */
+			rte_pktmbuf_adj(m, sizeof(struct ether_hdr));
+
+			ret = extract_packet_fields(m, &fields);
+			if (ret < 0) {
+				RTE_LOG(ALERT, GATEKEEPER,
+					"gt: a packet with unexpected IP version %hu is coming from Gatekeeper servers!\n",
+					fields.inner_ip_ver);
+				rte_pktmbuf_free(m);
+				continue;
+			}
 
 			/*
-			 * TODO Lookup the policy decision.
+	 		 * Fill up the Ethernet header, and forward
+			 * the original packet to the destination.
+	 		 */
+			new_eth = (struct ether_hdr *)
+				rte_pktmbuf_prepend(
+				m, sizeof(struct ether_hdr));
+			ether_addr_copy(&gt_conf->net->front.eth_addr,
+				&new_eth->s_addr);
+	 		/*
+			 * TODO The destination MAC address
+			 * comes from LLS block.
+			 */
+
+			new_eth->ether_type =
+				rte_cpu_to_be_16(fields.inner_ip_ver);
+
+			/*
+			 * Lookup the policy decision.
 			 *
 			 * The policy, which is defined by a Lua script,
 			 * decides which capabilities to grant or decline,
 			 * the maximum receiving rate of the granted
 			 * capabilities, and when each decision expires.
+			 *
+			 * Notice that, the packet now only contains L3
+			 * and above information.
 			 */
+			ret = lookup_policy_decision(&fields,
+				lcore, &policy, instance);
+			if (ret < 0) {
+				rte_pktmbuf_free(m);
+				continue;
+			}
+
+			if (policy.state == GK_GRANTED)
+				tx_bufs[num_tx++] = m;
+			else
+				rte_pktmbuf_free(m);
 
 			/* TODO Reply the policy decision to GK-GT unit. */
 		}
 
 		/* Send burst of TX packets, to second port of pair. */
 		num_tx_succ = rte_eth_tx_burst(port, tx_queue,
-			rx_bufs, num_rx);
+			tx_bufs, num_tx);
 
 		/*
 		 * XXX Do something better here!
 		 * For now, free any unsent packets.
 		 */
-		if (unlikely(num_tx_succ < num_rx)) {
-			for (i = num_tx_succ; i < num_rx; i++)
-				rte_pktmbuf_free(rx_bufs[i]);
+		if (unlikely(num_tx_succ < num_tx)) {
+			for (i = num_tx_succ; i < num_tx; i++)
+				rte_pktmbuf_free(tx_bufs[i]);
 		}
 	}
 
@@ -129,9 +251,20 @@ alloc_gt_conf(void)
 	return rte_calloc("gt_config", 1, sizeof(struct gt_config), 0);
 }
 
+static inline void
+cleanup_gt_instance(struct gt_instance *instance)
+{
+	lua_close(instance->lua_state);
+	instance->lua_state = NULL;
+}
+
 static int
 cleanup_gt(struct gt_config *gt_conf)
 {
+	int i;
+	for (i = 0; i < gt_conf->num_lcores; i++)
+		cleanup_gt_instance(&gt_conf->instances[i]);
+
 	rte_free(gt_conf->instances);
 	rte_free(gt_conf->lcores);
 	rte_free(gt_conf);
@@ -153,15 +286,66 @@ gt_conf_put(struct gt_config *gt_conf)
 }
 
 static int
+config_gt_instance(struct gt_config *gt_conf, unsigned int lcore_id)
+{
+	int ret;
+	char lua_entry_path[128];
+	unsigned int block_idx = get_block_idx(gt_conf, lcore_id);
+	struct gt_instance *instance = &gt_conf->instances[block_idx];
+
+	ret = snprintf(lua_entry_path, sizeof(lua_entry_path), \
+			"%s/%s", LUA_POLICY_BASE_DIR, GRANTOR_CONFIG_FILE);
+	RTE_VERIFY(ret > 0 && ret < (int)sizeof(lua_entry_path));
+
+	instance->lua_state = luaL_newstate();
+	if (instance->lua_state == NULL) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gt: failed to create new Lua state at lcore %u!\n",
+			lcore_id);
+		ret = -1;
+		goto out;
+	}
+
+	luaL_openlibs(instance->lua_state);
+	set_lua_path(instance->lua_state, LUA_POLICY_BASE_DIR);
+	ret = luaL_loadfile(instance->lua_state, lua_entry_path);
+	if (ret != 0) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gt: %s!\n", lua_tostring(instance->lua_state, -1));
+		ret = -1;
+		goto free_lua_state;
+	}
+
+	/* Run the loaded chunk. */
+	ret = lua_pcall(instance->lua_state, 0, 0, 0);
+	if (ret != 0) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gt: %s!\n", lua_tostring(instance->lua_state, -1));
+		ret = -1;
+		goto free_lua_state;
+	}
+
+	goto out;
+
+free_lua_state:
+	lua_close(instance->lua_state);
+	instance->lua_state = NULL;
+out:
+	return ret;
+}
+
+static int
 init_gt_instances(struct gt_config *gt_conf)
 {
 	int i;
 	int ret;
+	int num_succ_instances = 0;
+	struct gt_instance *inst_ptr;
 
 	/* Set up queue identifiers now for RSS, before instances start. */
 	for (i = 0; i < gt_conf->num_lcores; i++) {
 		unsigned int lcore = gt_conf->lcores[i];
-		struct gt_instance *inst_ptr = &gt_conf->instances[i];
+		inst_ptr = &gt_conf->instances[i];
 
 		ret = get_queue_id(&gt_conf->net->front, QUEUE_TYPE_RX, lcore);
 		if (ret < 0) {
@@ -178,10 +362,24 @@ init_gt_instances(struct gt_config *gt_conf)
 			goto out;
 		}
 		inst_ptr->tx_queue = ret;
+
+		/*
+		 * Set up the lua state for each instance,
+		 * and initialize the policy tables.
+		 */
+		ret = config_gt_instance(gt_conf, lcore);
+		if (ret < 0)
+			goto free_lua_state;
+
+		num_succ_instances++;
 	}
 
 	ret = 0;
+	goto out;
 
+free_lua_state:
+	for (i = 0; i < num_succ_instances; i++)
+		cleanup_gt_instance(&gt_conf->instances[i]);
 out:
 	return ret;
 }

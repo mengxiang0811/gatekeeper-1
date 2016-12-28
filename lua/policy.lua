@@ -1,0 +1,61 @@
+local policylib = require("policylib")
+local ffi = require("ffi")
+
+local policy_names = {
+	"simple_policy",
+}
+
+local default = {
+    	["params"] = {
+        	["tx_rate_kb_sec"] = 10,
+        	["cap_expire_sec"] = 10,
+		["next_renewal_ms"] = 10,
+		["renewal_step_ms"] = 10,
+        	["action"] = policylib.c.GK_GRANTED,
+    	},
+}
+
+GLOBAL_POLICIES = {}
+for key, value in ipairs(policy_names) do
+	local policy_module = require(value)
+	local policies = policy_module.setup_policy()
+
+	if policies ~= nil then
+		GLOBAL_POLICIES[value] = policies
+	end
+end
+
+function lookup_policy(fields, policy)
+	local pf = ffi.cast("struct gt_packet_fields *", fields)
+	local pl = ffi.cast("struct ggu_policy *", policy)
+	local group = nil
+
+	for key, value in ipairs(policy_names) do
+		local policy_module = require(value)
+		local g = policy_module.lookup_policy(
+			GLOBAL_POLICIES[value], pf)
+
+		if g ~= nil then
+			group = g
+			break
+		end
+	end
+
+	if group == nil then group = default end
+
+	pl.state = group["params"]["action"]
+
+	if pl.state == policylib.c.GK_DECLINED then
+		pl.params.u.declined.expire_sec =
+			group["params"]["expire_sec"]
+	else
+		pl.params.u.granted.tx_rate_kb_sec =
+			group["params"]["tx_rate_kb_sec"]
+		pl.params.u.granted.cap_expire_sec =
+			group["params"]["cap_expire_sec"]
+		pl.params.u.granted.next_renewal_ms =
+			group["params"]["next_renewal_ms"]
+		pl.params.u.granted.renewal_step_ms =
+			group["params"]["renewal_step_ms"]
+	end
+end
