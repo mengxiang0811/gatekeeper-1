@@ -24,12 +24,60 @@
 #include "gatekeeper_ipip.h"
 #include "gatekeeper_ggu.h"
 #include "gatekeeper_mailbox.h"
+#include "gatekeeper_lpm.h"
+
+/*
+ * The LPM supports 8-bit next hop,
+ * which at most has 128 different values.
+ */
+#define GK_MAX_NUM_POLICIES (128)
+
+#define GK_MAX_NUM_GRANTORS (4)
 
 /*
  * A flow entry can be in one of three states:
  * request, granted, or declined.
  */
 enum gk_flow_state { GK_REQUEST, GK_GRANTED, GK_DECLINED };
+
+enum gk_policy_action {
+	/* Forward the packet to a Grantor server. */
+	GK_FWD_GT,
+
+	/* Forward the packet to the back interface. */
+	GK_FWD_BCAK_NET,
+
+	/* Drop the packet. */
+	GK_DROP,
+};
+
+struct gk_policy {
+
+	enum gk_policy_action action;
+
+	/* Data that supports different policy actions. */
+	union {
+		int grantor_id;
+	} u;
+};
+
+struct gk_lpm {
+	/* The LPM tables shared by the GK instances on the same socket. */
+	struct rte_lpm   *lpm;
+	struct rte_lpm6  *lpm6;
+
+	/* The number of policies added to the policy table. */
+	uint8_t          num_policies;
+
+	/* The policy table that decides the actions on packets. */
+	struct gk_policy policy_tbl[GK_MAX_NUM_POLICIES];
+
+	/* The number of tunnels avaiable for the server. */
+	unsigned int     num_tunnels;
+
+	/* The tunnel informaiton for the server. */
+	struct ipip_tunnel_info tunnels[GK_MAX_NUM_GRANTORS];
+};
 
 /* Structures for each GK instance. */
 struct gk_instance {
@@ -39,13 +87,32 @@ struct gk_instance {
 	uint16_t          rx_queue_front;
 	/* TX queue on the back interface. */
 	uint16_t          tx_queue_back;
-	struct mailbox    mb; 
+	struct mailbox    mb;
+	/* The LPM table used by the gk instance. */
+	struct gk_lpm     *lpm_tbl;
 };
 
 /* Configuration for the GK functional block. */
 struct gk_config {
 	/* Specify the size of the flow hash table. */
 	unsigned int	   flow_ht_size;
+
+	/*
+	 * DPDK LPM library implements the DIR-24-8 algorithm
+	 * using two types of tables:
+	 * (1) tbl24 is a table with 2^24 entries.
+	 * (2) tbl8 is a table with 2^8 entries.
+	 *
+	 * To configure an LPM component instance, one needs to specify:
+	 * @max_rules: the maximum number of rules to support.
+	 * @number_tbl8s: the number of tbl8 tables.
+	 *
+	 * Here, it supports both IPv4 and IPv6 configuration.
+	 */
+	unsigned int       max_num_ipv4_rules;
+	unsigned int       num_ipv4_tbl8s;
+	unsigned int       max_num_ipv6_rules;
+	unsigned int       num_ipv6_tbl8s;
 
 	/*
 	 * The fields below are for internal use.
@@ -59,9 +126,28 @@ struct gk_config {
 	/* The number of lcore ids in @lcores. */
 	int                num_lcores;
 
+	/* For performance, each socket should have its own lpm table. */
+	int                num_sockets;
+
 	struct gk_instance *instances;
 	struct net_config  *net;
+	/* The LPM tables used by the gk instances. */
+	struct gk_lpm      *lpm_tbl;
 	struct gatekeeper_rss_config rss_conf;
+};
+
+/* Structure for Lua set up the LPM routes. */
+struct lua_ip_routes {
+	const char *ip_addr;
+	uint8_t    prefix_len;
+	uint8_t    policy_id;
+};
+
+/* Structure for Lua set up the LPM policies. */
+struct lua_gk_policy {
+	uint8_t               policy_id;
+	enum gk_policy_action action;
+	int                   grantor_id;
 };
 
 /* Define the possible command operations for GK block. */
@@ -82,6 +168,11 @@ struct gk_cmd_entry {
 
 struct gk_config *alloc_gk_conf(void);
 int gk_conf_put(struct gk_config *gk_conf);
+int lua_init_gk_lpm(
+	struct gk_config *gk_conf, struct net_config *net_conf,
+	struct lua_ip_routes *routes, int num_routes,
+	struct lua_gk_policy *policies, int num_policies,
+	const char **grantor_addrs, int num_grantors);
 int run_gk(struct net_config *net_conf, struct gk_config *gk_conf);
 struct mailbox *get_responsible_gk_mailbox(
 	const struct ip_flow *flow, const struct gk_config *gk_conf);

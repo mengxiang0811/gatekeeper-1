@@ -114,8 +114,30 @@ struct net_config {
 	/* This struct has hidden fields. */
 };
 
+enum gk_policy_action {
+	GK_FWD_GT,
+	GK_FWD_BCAK_NET,
+	GK_DROP,
+};
+
+struct lua_ip_routes {
+	const char *ip_addr;
+	uint8_t    prefix_len;
+	uint8_t    policy_id;
+};
+
+struct lua_gk_policy {
+	uint8_t               policy_id;
+	enum gk_policy_action action;
+	int                   grantor_id;
+};
+
 struct gk_config {
 	unsigned int flow_ht_size;
+	unsigned int max_num_ipv4_rules;
+	unsigned int num_ipv4_tbl8s;
+	unsigned int max_num_ipv6_rules;
+	unsigned int num_ipv6_tbl8s;
 	/* This struct has hidden fields. */
 };
 
@@ -154,6 +176,11 @@ struct gatekeeper_if *get_if_back(struct net_config *net_conf);
 int gatekeeper_init_network(struct net_config *net_conf);
 
 struct gk_config *alloc_gk_conf(void);
+int lua_init_gk_lpm(
+	struct gk_config *gk_conf, struct net_config *net_conf,
+	struct lua_ip_routes *routes, int num_routes,
+	struct lua_gk_policy *policies, int num_policies,
+	const char **grantor_addrs, int num_grantors);
 int run_gk(struct net_config *net_conf, struct gk_config *gk_conf);
 
 struct ggu_config *alloc_ggu_conf(void);
@@ -198,4 +225,32 @@ function init_iface(iface, name, ports, cidrs)
 		error("Failed to initilialize " .. name .. " interface")
 	end
 	return ret
+end
+
+function init_lpm(gk_conf, net_conf, segments, gk_policies, gt_addrs)
+	local routes =
+		ffi.new("struct lua_ip_routes [" .. #segments .. "]")
+	for i, v in ipairs(segments) do
+		routes[i - 1].ip_addr = v["ip_addr"]
+		routes[i - 1].prefix_len = v["prefix_len"]
+		routes[i - 1].policy_id = v["policy_id"]
+	end
+
+	local policies =
+		ffi.new("struct lua_gk_policy [" .. #gk_policies .. "]")
+	for i, v in ipairs(gk_policies) do
+		policies[i - 1].policy_id = v["policy_id"]
+		policies[i - 1].action = v["action"]
+		policies[i - 1].grantor_id = v["grantor_id"]
+	end
+
+	local grantors =
+		ffi.new("const char *[" .. #gt_addrs .. "]")
+	for i, v in ipairs(gt_addrs) do
+		grantors[i - 1] = v
+	end
+
+	return c.lua_init_gk_lpm(
+		gk_conf, net_conf, routes, #segments,
+		policies, #gk_policies, grantors, #gt_addrs)
 end

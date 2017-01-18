@@ -20,6 +20,7 @@
 #define _GATEKEEPER_NET_H_
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <netinet/in.h>
 
 #include <rte_ethdev.h>
@@ -166,6 +167,9 @@ int lua_init_iface(struct gatekeeper_if *iface, const char *iface_name,
 	const char **ip_cidrs, uint8_t num_ip_cidrs);
 void lua_free_iface(struct gatekeeper_if *iface);
 
+int get_ip_type(const char *ip_addr);
+bool ipv4_if_configured(struct gatekeeper_if *iface);
+bool ipv6_if_configured(struct gatekeeper_if *iface);
 int ethertype_filter_add(uint8_t port_id, uint16_t ether_type,
 	uint16_t queue_id);
 int ntuple_filter_add(uint8_t portid, uint32_t dst_ip,
