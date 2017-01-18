@@ -127,6 +127,22 @@ struct net_config {
 	/* This struct has hidden fields. */
 };
 
+enum gk_fib_action {
+	GK_FWD_GRANTOR,
+	GK_FWD_GATEWAY,
+	GK_FWD_NEIGHBOR,
+	GK_FWD_BACK_NET,
+	GK_DROP,
+	GK_FIB_MAX,
+};
+
+struct lua_gk_fib {
+	const char         *ip_prefix;
+	enum gk_fib_action action;
+	const char         *grantor;
+	const char         *gateway;
+};
+
 struct gk_config {
 	unsigned int flow_ht_size;
 	unsigned int max_num_ipv4_rules;
@@ -171,7 +187,9 @@ struct gatekeeper_if *get_if_back(struct net_config *net_conf);
 int gatekeeper_init_network(struct net_config *net_conf);
 
 struct gk_config *alloc_gk_conf(void);
-int run_gk(struct net_config *net_conf, struct gk_config *gk_conf);
+int run_gk(const char *front_net_prefix, const char *front_net_prefix6,
+	const char *back_net_prefix, const char *back_net_prefix6,
+	struct net_config *net_conf, struct gk_config *gk_conf);
 
 struct ggu_config *alloc_ggu_conf(void);
 int run_ggu(struct net_config *net_conf,

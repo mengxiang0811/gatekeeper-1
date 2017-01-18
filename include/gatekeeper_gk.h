@@ -137,6 +137,12 @@ struct gk_fib {
 			struct gk_fib *next_fib;
 
 			/*
+			 * Indicate whether the fib entry is used for
+			 * Grantor IP prefix.
+			 */
+			bool is_grantor_prefix_fib;
+
+			/*
 		 	 * When the action is GK_FWD_GRANTOR, we need
 			 * the IP flow information.
 		 	 */
@@ -232,6 +238,13 @@ struct gk_config {
 
 	struct gk_instance *instances;
 	struct net_config  *net;
+
+	/* The network prefixes. */
+	char               *front_net_prefix;
+	char               *front_net_prefix6;
+	char               *back_net_prefix;
+	char               *back_net_prefix6;
+
 	/*
 	 * The LPM table used by the GK instances.
 	 * We assume that all the GK instances are
@@ -245,6 +258,22 @@ struct gk_config {
 
 	/* The RSS configuration for the back interface. */
 	struct gatekeeper_rss_config rss_conf_back;
+};
+
+/* Structure for Lua set up the LPM IP range fib. */
+struct lua_gk_fib {
+
+	/* The IP prefix, to which the fib entry applied. */
+	const char         *ip_prefix;
+
+	/* The action of the fib entry. */
+	enum gk_fib_action action;
+
+	/* The Grantor server IP address. */
+	const char         *grantor;
+
+	/* The gateway IP address. */
+	const char         *gateway;
 };
 
 /* Define the possible command operations for GK block. */
@@ -265,7 +294,10 @@ struct gk_cmd_entry {
 
 struct gk_config *alloc_gk_conf(void);
 int gk_conf_put(struct gk_config *gk_conf);
-int run_gk(struct net_config *net_conf, struct gk_config *gk_conf);
+int add_fib_entry(struct lua_gk_fib *gk_fib, struct gk_config *gk_conf);
+int run_gk(const char *front_net_prefix, const char *front_net_prefix6,
+	const char *back_net_prefix, const char *back_net_prefix6,
+	struct net_config *net_conf, struct gk_config *gk_conf);
 struct mailbox *get_responsible_gk_mailbox(
 	const struct ip_flow *flow, const struct gk_config *gk_conf);
 

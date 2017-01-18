@@ -451,7 +451,7 @@ lua_free_iface(struct gatekeeper_if *iface)
 	destroy_iface(iface, IFACE_DESTROY_LUA);
 }
 
-static int
+int
 get_ip_type(const char *ip_addr)
 {
 	int ret;
@@ -482,13 +482,24 @@ get_ip_type(const char *ip_addr)
 	return ret;
 }
 
-static inline int
-max_prefix_len(int ip_type)
+int
+convert_str_to_ip(const char *ip_addr, struct ipaddr *res)
 {
-	RTE_VERIFY(ip_type == AF_INET || ip_type == AF_INET6);
-	return ip_type == AF_INET
-		? sizeof(struct in_addr) * 8
-		: sizeof(struct in6_addr) * 8;
+	int ip_type = get_ip_type(ip_addr);
+	if (ip_type == AF_INET) {
+		if (inet_pton(AF_INET, ip_addr, &res->ip.v4) != 1)
+			return -1;
+
+		res->proto = ETHER_TYPE_IPv4;
+	} else if (likely(ip_type == AF_INET6)) {
+		if (inet_pton(AF_INET6, ip_addr, &res->ip.v6) != 1)
+			return -1;
+
+		res->proto = ETHER_TYPE_IPv6;
+	} else
+		return -1;
+
+	return 0;
 }
 
 int

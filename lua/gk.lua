@@ -20,10 +20,17 @@ return function (net_conf, numa_table)
 	gk_conf.max_num_ipv6_rules = 1024
 	gk_conf.num_ipv6_tbl8s = 65536
 
- 	-- TODO Edit of the FIB table.
+	local front_net_prefix = "10.0.0.1/24"
+	local front_net_prefix6 = "2001:db8::1/32"
+
+	local back_net_prefix = "10.0.0.2/24"
+	local back_net_prefix6 = "2001:db8::2/32"
 
 	-- Setup the GK functional block.
-	local ret = gatekeeper.c.run_gk(net_conf, gk_conf)
+	ret = gatekeeper.c.run_gk(
+		front_net_prefix, front_net_prefix6,
+		back_net_prefix, back_net_prefix6,
+		net_conf, gk_conf)
 	if ret < 0 then
 		error("Failed to run gk block(s)")
 	end

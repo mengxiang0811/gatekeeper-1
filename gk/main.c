@@ -1153,6 +1153,24 @@ cleanup_gk(struct gk_config *gk_conf)
                 destroy_mailbox(&gk_conf->instances[i].mb);
 	}
 
+	for (i = 0; i < 2; i++) {
+		if (gk_conf->lpm_tbl.fib_tbl[i].u.neigh.cache_tbl != NULL)
+			rte_free(gk_conf->lpm_tbl.fib_tbl[i].
+				u.neigh.cache_tbl);
+
+		if (gk_conf->lpm_tbl.fib_tbl[i].u.neigh.hash_table != NULL)
+			rte_hash_free(gk_conf->lpm_tbl.fib_tbl[i].
+				u.neigh.hash_table);
+
+		if (gk_conf->lpm_tbl.fib_tbl6[i].u.neigh.cache_tbl != NULL)
+			rte_free(gk_conf->lpm_tbl.fib_tbl6[i].
+				u.neigh.cache_tbl);
+
+		if (gk_conf->lpm_tbl.fib_tbl6[i].u.neigh.hash_table != NULL)
+			rte_hash_free(gk_conf->lpm_tbl.fib_tbl6[i].
+				u.neigh.hash_table);
+	}
+
 	destroy_gk_lpm(&gk_conf->lpm_tbl);
 
 	rte_free(gk_conf->instances);
@@ -1171,6 +1189,95 @@ gk_conf_put(struct gk_config *gk_conf)
 	 */
 	if (rte_atomic32_dec_and_test(&gk_conf->ref_cnt))
 		return cleanup_gk(gk_conf);
+
+	return 0;
+}
+
+static int
+parse_ip_prefix(const char *ip_prefix, struct ipaddr *res)
+{
+	/* Need to make copy to tokenize. */
+	size_t ip_prefix_len = strlen(ip_prefix);
+	char ip_prefix_copy[ip_prefix_len + 1];
+	char *ip_addr;
+
+	char *saveptr;
+	char *prefix_len_str;
+	char *end;
+	long prefix_len;
+	int ip_type;
+
+	strncpy(ip_prefix_copy, ip_prefix, ip_prefix_len + 1);
+
+	ip_addr = strtok_r(ip_prefix_copy, "/", &saveptr);
+	if (ip_addr == NULL)
+		return -1;
+
+	ip_type = get_ip_type(ip_addr);
+
+	prefix_len_str = strtok_r(NULL, "\0", &saveptr);
+	if (prefix_len_str == NULL)
+		return -1;
+
+	prefix_len = strtol(prefix_len_str, &end, 10);
+	if (prefix_len_str == end || !*prefix_len_str || *end) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: prefix length \"%s\" is not a number\n",
+			prefix_len_str);
+		return -1;
+	}
+
+	if ((prefix_len == LONG_MAX || prefix_len == LONG_MIN) &&
+			errno == ERANGE) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: prefix length \"%s\" caused underflow or overflow\n",
+			prefix_len_str);
+		return -1;
+	}
+
+	if (prefix_len < 0 || prefix_len > max_prefix_len(ip_type)) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: prefix length \"%s\" is out of range\n",
+			prefix_len_str);
+		return -1;
+	}
+
+	if (convert_str_to_ip(ip_addr, res) < 0) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: failed to convert ip prefix %s to a number!\n",
+			ip_prefix);
+		return -1;
+	}
+
+	return prefix_len;
+}
+
+static int
+init_fib_tbl(struct gk_config *gk_conf)
+{
+	unsigned int i;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+
+	/* TODO Set up the neighbor hash tables. */
+
+	/*
+	 * We use the first fib entry with
+	 * action GK_FWD_NEIGHBOR_FRONT_NET.
+	 */
+	ltbl->fib_tbl[0].action = GK_FWD_NEIGHBOR_FRONT_NET;
+	ltbl->fib_tbl6[0].action = GK_FWD_NEIGHBOR_FRONT_NET;
+
+	/*
+	 * We use the second fib entry with
+	 * action GK_FWD_NEIGHBOR_BACK_NET.
+	 */
+	ltbl->fib_tbl[1].action = GK_FWD_NEIGHBOR_BACK_NET;
+	ltbl->fib_tbl6[1].action = GK_FWD_NEIGHBOR_BACK_NET;
+
+	for (i = 2; i < GK_MAX_NUM_FIB_ENTRIES; i++) {
+		ltbl->fib_tbl[i].action = GK_FIB_MAX;
+		ltbl->fib_tbl6[i].action = GK_FIB_MAX;
+	}
 
 	return 0;
 }
@@ -1212,12 +1319,403 @@ setup_gk_lpm(struct gk_config *gk_conf, unsigned int socket_id)
 		goto free_lpm;
 	}
 
+	ret = init_fib_tbl(gk_conf);
+	if (ret < 0)
+		goto free_lpm6;
+
 	ret = 0;
 	goto out;
+
+free_lpm6:
+	destroy_ipv6_lpm(ltbl->lpm6);
 
 free_lpm:
 	destroy_ipv4_lpm(ltbl->lpm);
 
+out:
+	return ret;
+}
+
+static int
+gk_lpm_add_ipv4_routes(
+	struct rte_lpm *lpm, struct ipv4_lpm_route *routes,
+	unsigned int num_routes, struct gk_lpm *ltbl)
+{
+	int ret = 0;
+	unsigned int i;
+	for (i = 0; i < num_routes; i++) {
+		ret = rte_lpm_add(lpm, routes[i].ip,
+			routes[i].depth, routes[i].nexthop);
+		if (ret < 0)
+			goto out;
+		ltbl->fib_tbl[routes[i].nexthop].ref_cnt++;
+	}
+
+out:
+	return ret;
+}
+
+static int
+gk_lpm_add_ipv6_routes(
+	struct rte_lpm6 *lpm, struct ipv6_lpm_route *routes,
+	unsigned int num_routes, struct gk_lpm *ltbl)
+{
+	int ret = 0;
+	unsigned int i;
+	for (i = 0; i < num_routes; i++) {
+		ret = rte_lpm6_add(lpm, routes[i].ip,
+			routes[i].depth, routes[i].nexthop);
+		if (ret < 0)
+			goto out;
+		ltbl->fib_tbl6[routes[i].nexthop].ref_cnt++;
+	}
+
+out:
+	return ret;
+}
+
+static int
+get_empty_fib_id(struct gk_fib *fib_tbl)
+{
+	int i;
+	for (i = 0; i < GK_MAX_NUM_FIB_ENTRIES; i++) {
+		if (fib_tbl[i].action == GK_FIB_MAX)
+			return i; 
+	}
+
+	RTE_LOG(WARNING, GATEKEEPER,
+		"gk: cannot find an empty fib entry in the LPM fib_tbl!\n");
+
+	return -1;
+}
+
+static struct gk_fib *
+add_prefix_fib(struct ipaddr *ip_addr,
+	int prefix_len, struct gk_config *gk_conf)
+{
+	int ret;
+	int fib_id = -1;
+	struct ipv4_lpm_route ipv4_route;
+	struct ipv6_lpm_route ipv6_route;
+	struct gk_fib *new_fib = NULL;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+
+	/* Find an empty fib entry for the IP address. */
+	if (ip_addr->proto == ETHER_TYPE_IPv4) {
+		if (!ipv4_if_configured(&gk_conf->net->back))
+			goto out;
+
+		fib_id = get_empty_fib_id(ltbl->fib_tbl);
+		if (fib_id < 0)
+			goto out;
+
+		new_fib = &ltbl->fib_tbl[fib_id];
+
+		/*
+		 * Add the fib entry for the IPv4 address
+		 * to the IPv4 LPM table.
+		 */
+		ipv4_route.ip = ip_addr->ip.v4.s_addr;
+		ipv4_route.depth = prefix_len;
+		ipv4_route.nexthop = fib_id;
+		ret = gk_lpm_add_ipv4_routes(
+			ltbl->lpm, &ipv4_route, 1, ltbl);
+		if (ret < 0)
+			goto out;
+	} else if (ip_addr->proto == ETHER_TYPE_IPv6) {
+		if (!ipv6_if_configured(&gk_conf->net->back))
+			goto out;
+
+		fib_id = get_empty_fib_id(ltbl->fib_tbl6);
+		if (fib_id < 0)
+			goto out;
+
+		new_fib = &ltbl->fib_tbl6[fib_id];
+
+		/*
+		 * Add the fib entry for the IPv6 address 
+		 * to the IPv6 LPM table.
+		 */
+		rte_memcpy(ipv6_route.ip,
+			ip_addr->ip.v6.s6_addr, sizeof(ipv6_route.ip));
+		ipv6_route.depth = prefix_len;
+		ipv6_route.nexthop = fib_id;
+		ret = gk_lpm_add_ipv6_routes(
+			ltbl->lpm6, &ipv6_route, 1, ltbl);
+		if (ret < 0)
+			goto out;
+	} else
+		goto out;
+
+out:
+	return new_fib;
+}
+
+static struct gk_fib *
+init_gateway_fib(struct ipaddr *gw_addr, struct ipaddr *ip_prefix_addr,
+	int ip_prefix_len, enum gk_fib_action action, struct gk_config *gk_conf)
+{
+	int fib_id = -1;
+	struct ether_cache *eth_cache;
+	struct gk_fib *gw_fib = NULL;
+	struct gk_fib *gt_fib = NULL;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+
+	if (gw_addr->proto != ip_prefix_addr->proto) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: failed to initialize a fib entry for gateway, since the gateway and its responsible grantors have different IP versions.\n");
+		goto out;
+	}
+
+	if (action != GK_FWD_GATEWAY_FRONT_NET
+			&& action != GK_FWD_GATEWAY_BACK_NET) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: failed to initialize a fib entry for gateway, since it has invalid action %d.\n",
+			action);
+		goto out;
+	}
+
+	/* Find the fib entry for the gateway IP address. */
+	if (gw_addr->proto == ETHER_TYPE_IPv4) {
+		fib_id = lpm_lookup_ipv4(ltbl->lpm, gw_addr->ip.v4.s_addr);
+		if (fib_id < 0) {
+			gw_fib = add_prefix_fib(gw_addr,
+				(sizeof(struct in_addr) * 8), gk_conf);
+		} else
+			gw_fib = &ltbl->fib_tbl[fib_id];
+	} else if (gw_addr->proto == ETHER_TYPE_IPv6) {
+		fib_id = lpm_lookup_ipv6(ltbl->lpm6, gw_addr->ip.v6.s6_addr);
+		if (fib_id < 0) {
+			gw_fib = add_prefix_fib(gw_addr,
+				(sizeof(struct in6_addr) * 8), gk_conf);
+		} else
+			gw_fib = &ltbl->fib_tbl6[fib_id];
+	} else
+		rte_panic("Unexpected condiction: unknown IP type %hu at %s!\n",
+			gw_addr->proto, __func__);
+
+	if (gw_fib == NULL)
+		goto out;
+
+	/* Fill up the fib entry for the gateway. */
+	gw_fib->action = action;
+
+	rte_memcpy(&gw_fib->u.gateway.ip_addr,
+		gw_addr, sizeof(gw_fib->u.gateway.ip_addr));
+
+	eth_cache = gw_fib->u.gateway.eth_cache;
+	eth_cache->stale = true;
+	eth_cache->eth_hdr.ether_type = gw_addr->proto;
+	eth_cache->ref_cnt++;
+
+	/*
+	 * Add a fib entry for the Grantor IP prefix,
+	 * for which the gateway is responsible.
+	 *
+	 * Notice, for this fib, it doesn't need to initialize the
+	 * fields @flow and @eth_cache, since it's only used to help
+	 * lookup the fib entry for the gateway.
+	 */
+	gt_fib = add_prefix_fib(ip_prefix_addr, ip_prefix_len, gk_conf);
+	if (gt_fib != NULL) {
+		gt_fib->action = GK_FWD_GRANTOR;
+		gt_fib->u.grantor.next_fib = gw_fib;
+		gt_fib->u.grantor.is_grantor_prefix_fib = true;
+		gw_fib->ref_cnt++;
+	}
+
+out:
+	return gw_fib;
+}
+
+static struct gk_fib *
+init_grantor_fib(struct ipaddr *gt_addr, struct gk_config *gk_conf)
+{
+	int fib_id = -1;
+	int prefix_len;
+	struct ip_flow *flow;
+	struct gk_fib *gt_fib = NULL;
+	struct gk_fib *gt_prefix_fib = NULL;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+
+	/* Find the fib entry for the Grantor IP prefix. */
+	if (gt_addr->proto == ETHER_TYPE_IPv4) {
+		fib_id = lpm_lookup_ipv4(ltbl->lpm, gt_addr->ip.v4.s_addr);
+		if (fib_id >= 0)
+			gt_prefix_fib = &ltbl->fib_tbl[fib_id];
+
+		prefix_len = sizeof(struct in_addr) * 8;
+	} else if (gt_addr->proto == ETHER_TYPE_IPv6) {
+		fib_id = lpm_lookup_ipv6(ltbl->lpm6, gt_addr->ip.v6.s6_addr);
+		if (fib_id >= 0)
+			gt_prefix_fib = &ltbl->fib_tbl6[fib_id];
+
+		prefix_len = sizeof(struct in6_addr) * 8;
+	} else
+		rte_panic("Unexpected condiction: unknown IP type %hu at %s!\n",
+			gt_addr->proto, __func__);
+
+	/* It's the fib entry for the Grantor. */
+	if (gt_prefix_fib && !gt_prefix_fib->u.grantor.is_grantor_prefix_fib)
+		return gt_prefix_fib;
+
+	gt_fib = add_prefix_fib(gt_addr, prefix_len, gk_conf);
+	if (gt_fib == NULL)
+		goto out;
+
+	gt_fib->action = GK_FWD_GRANTOR;
+	flow = &gt_fib->u.grantor.flow;
+
+	if (gt_addr->proto == ETHER_TYPE_IPv4) {
+		flow->proto = ETHER_TYPE_IPv4;
+		flow->f.v4.src = gk_conf->net->back.ip4_addr.s_addr;
+		flow->f.v4.dst = gt_addr->ip.v4.s_addr;
+	} else {
+		flow->proto = ETHER_TYPE_IPv6;
+		rte_memcpy(flow->f.v6.src,
+			gk_conf->net->back.ip6_addr.s6_addr,
+			sizeof(flow->f.v6.src));
+		rte_memcpy(flow->f.v6.dst,
+			gt_addr->ip.v6.s6_addr, sizeof(flow->f.v6.dst));
+	}
+
+	/* Fill up the @next_fib field in the @gt_fib. */
+
+	/* The Grantor server is an neighbor. */
+	if (gt_prefix_fib == NULL) {
+		gt_fib->u.grantor.eth_cache->stale = true;
+		gt_fib->u.grantor.eth_cache->eth_hdr.ether_type =
+			gt_addr->proto;
+		gt_fib->u.grantor.eth_cache->ref_cnt++;
+		gt_fib->u.grantor.next_fib =
+			gt_addr->proto == ETHER_TYPE_IPv4 ?
+			ltbl->fib_tbl : ltbl->fib_tbl6;
+		gt_fib->u.grantor.next_fib->ref_cnt++;
+	} else {
+		gt_fib->u.grantor.next_fib =
+			gt_prefix_fib->u.grantor.next_fib;
+		gt_fib->u.grantor.next_fib->ref_cnt++;
+	}
+
+out:
+	return gt_fib;
+}
+
+int
+add_fib_entry(struct lua_gk_fib *gk_fib, struct gk_config *gk_conf)
+{
+	int ret;
+
+	struct ipaddr gw_addr;
+	struct gk_fib *gw_fib = NULL;
+
+	struct ipaddr gt_addr;
+	struct gk_fib *gt_fib = NULL;
+
+	struct ipaddr ip_prefix_addr;
+	int ip_prefix_len;
+	struct gk_fib *ip_prefix_fib = NULL;
+
+	switch (gk_fib->action) {
+	case GK_FWD_GRANTOR: {
+
+		/* Initialize the fib entry for the Grantor. */
+		ret = convert_str_to_ip(gk_fib->grantor, &gt_addr);
+		if (ret < 0)
+			goto out;
+
+		gt_fib = init_grantor_fib(&gt_addr, gk_conf);
+		if (gt_fib == NULL) {
+			ret = -1;
+			goto out;
+		}
+
+		/* Initialize the fib entry for the IP prefix. */
+ 		ip_prefix_len = parse_ip_prefix(
+			gk_fib->ip_prefix, &ip_prefix_addr);
+		if (ip_prefix_len < 0) {
+			ret = -1;
+			goto out;
+		}
+
+		ip_prefix_fib = add_prefix_fib(
+			&ip_prefix_addr, ip_prefix_len, gk_conf);
+		if (ip_prefix_fib == NULL) {
+			ret = -1;
+			goto out;
+		}
+
+		rte_memcpy(ip_prefix_fib, gt_fib, sizeof(*ip_prefix_fib));
+		gt_fib->u.grantor.next_fib->ref_cnt++;
+
+		/*
+	 	 * XXX The nexthop MAC address should be
+	 	 * initialized only after NICs start.
+	 	 */
+		break;
+	}
+
+	case GK_FWD_GATEWAY_FRONT_NET:
+	case GK_FWD_GATEWAY_BACK_NET:
+		/* Initialize the fib entry for the gateway. */
+		ret = convert_str_to_ip(gk_fib->gateway, &gw_addr);
+		if (ret < 0)
+			goto out;
+
+		ip_prefix_len = parse_ip_prefix(
+			gk_fib->ip_prefix, &ip_prefix_addr);
+		if (ip_prefix_len < 0) {
+			ret = -1;
+			goto out;
+		}
+
+		gw_fib = init_gateway_fib(
+			&gw_addr, &ip_prefix_addr,
+			ip_prefix_len, gk_fib->action, gk_conf);
+		if (gw_fib == NULL) {
+			ret = -1;
+			goto out;
+		}
+
+		break;
+
+	case GK_FWD_NEIGHBOR_FRONT_NET:
+	case GK_FWD_NEIGHBOR_BACK_NET:
+		/* FALLTHROUGH */
+	case GK_DROP:
+		/* Initialize the fib entry for the IP prefix. */
+ 		ip_prefix_len = parse_ip_prefix(
+			gk_fib->ip_prefix, &ip_prefix_addr);
+		if (ip_prefix_len < 0) {
+			ret = -1;
+			goto out;
+		}
+
+		ip_prefix_fib = add_prefix_fib(
+			&ip_prefix_addr, ip_prefix_len, gk_conf);
+		if (ip_prefix_fib == NULL) {
+			ret = -1;
+			goto out;
+		}
+
+		ip_prefix_fib->action = gk_fib->action;
+
+		break;
+
+	default:
+		RTE_LOG(ERR, GATEKEEPER,
+			"Unknown fib action %u\n",
+			gk_fib->action);
+		ret = -1;
+		goto out;
+	}
+
+	RTE_LOG(NOTICE, GATEKEEPER,
+		"gk: add a fib entry [ip prefix = %s, action = %u, grantor = %s, gateway = %s]\n",
+		gk_fib->ip_prefix, gk_fib->action,
+		gk_fib->grantor, gk_fib->gateway);
+
+	ret = 0;
 out:
 	return ret;
 }
@@ -1319,11 +1817,15 @@ cleanup:
  * TODO Implement the addition of FIB entries in the dynamic configuration.
  */
 int
-run_gk(struct net_config *net_conf, struct gk_config *gk_conf)
+run_gk(const char *front_net_prefix, const char *front_net_prefix6,
+	const char *back_net_prefix, const char *back_net_prefix6,
+	struct net_config *net_conf, struct gk_config *gk_conf)
 {
 	int ret, i;
 
-	if (net_conf == NULL || gk_conf == NULL) {
+	if (front_net_prefix == NULL || front_net_prefix6 == NULL ||
+			back_net_prefix == NULL || back_net_prefix6 == NULL ||
+			net_conf == NULL || gk_conf == NULL) {
 		ret = -1;
 		goto out;
 	}
@@ -1338,6 +1840,46 @@ run_gk(struct net_config *net_conf, struct gk_config *gk_conf)
 
 	if (gk_conf->num_lcores <= 0)
 		goto success;
+
+	gk_conf->front_net_prefix = rte_malloc(
+		"ipv4_front_network_prefix", strlen(front_net_prefix) + 1, 0);
+	if (gk_conf->front_net_prefix == NULL) {
+		RTE_LOG(ERR, MALLOC, "%s: Out of memory for IPv4 front network prefix\n",
+			__func__);
+		ret = -1;
+		goto out;
+	}
+	strcpy(gk_conf->front_net_prefix, front_net_prefix);
+
+	gk_conf->front_net_prefix6 = rte_malloc(
+		"ipv6_front_network_prefix", strlen(front_net_prefix6) + 1, 0);
+	if (gk_conf->front_net_prefix6 == NULL) {
+		RTE_LOG(ERR, MALLOC, "%s: Out of memory for IPv6 front network prefix\n",
+			__func__);
+		ret = -1;
+		goto out;
+	}
+	strcpy(gk_conf->front_net_prefix6, front_net_prefix6);
+
+	gk_conf->back_net_prefix = rte_malloc(
+		"ipv4_back_network_prefix", strlen(back_net_prefix) + 1, 0);
+	if (gk_conf->back_net_prefix == NULL) {
+		RTE_LOG(ERR, MALLOC, "%s: Out of memory for IPv4 back network prefix\n",
+			__func__);
+		ret = -1;
+		goto out;
+	}
+	strcpy(gk_conf->back_net_prefix, back_net_prefix);
+
+	gk_conf->back_net_prefix6 = rte_malloc(
+		"ipv6_back_network_prefix", strlen(back_net_prefix6) + 1, 0);
+	if (gk_conf->back_net_prefix6 == NULL) {
+		RTE_LOG(ERR, MALLOC, "%s: Out of memory for IPv6 back network prefix\n",
+			__func__);
+		ret = -1;
+		goto out;
+	}
+	strcpy(gk_conf->back_net_prefix6, back_net_prefix6);
 
 	ret = net_launch_at_stage1(
 		net_conf, gk_conf->num_lcores, gk_conf->num_lcores,

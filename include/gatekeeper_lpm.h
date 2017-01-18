@@ -23,6 +23,17 @@
 #include <rte_lpm6.h>
 
 /* TODO Implement functions to edit IPv4/IPv6 routes. */
+struct ipv4_lpm_route {
+	uint32_t ip;
+	uint8_t  depth;
+	uint8_t  nexthop;
+};
+
+struct ipv6_lpm_route {
+	uint8_t ip[16];
+	uint8_t depth;
+	uint8_t nexthop;
+};
 
 /*
  * The API here aims to be general and allow developers
