@@ -18,6 +18,7 @@
 
 #include <string.h>
 #include <stdbool.h>
+#include <arpa/inet.h>
 
 #include <rte_ip.h>
 #include <rte_log.h>
@@ -30,9 +31,6 @@
 
 #include "gatekeeper_gk.h"
 #include "gatekeeper_main.h"
-#include "gatekeeper_net.h"
-#include "gatekeeper_mailbox.h"
-#include "gatekeeper_ipip.h"
 #include "gatekeeper_config.h"
 #include "gatekeeper_launch.h"
 #include "gatekeeper_lls.h"
@@ -60,6 +58,12 @@ struct flow_entry {
 	/* The state of the entry. */
 	enum gk_flow_state state;
 
+	/*
+	 * The fib entry that instructs where
+	 * to send the packets for this flow entry.
+	 */
+	struct gk_fib *grantor_fib;
+
 	union {
 		struct {
 			/* The time the last packet of the entry was seen. */
@@ -76,11 +80,6 @@ struct flow_entry {
 			 * @last_priority.
 			 */
 			uint8_t allowance;
-			/* 
-			 * The ID of the Grantor server to which packets to
-			 * @dst must be sent.
-			 */
-			int grantor_id;
 		} request;
 
 		struct {
@@ -96,11 +95,9 @@ struct flow_entry {
 			/* How many bytes @src can still send in current cycle. */
 			int budget_byte;
 			/*
-			 * The ID of the Grantor server to which packets to
-			 * @dst must be sent.
+			 * When GK should send the next renewal to
+			 * the corresponding grantor.
 			 */
-			int grantor_id;
-			/* When GK should send the next renewal to @grantor_id. */
 			uint64_t send_next_renewal_at;
 			/*
 			 * How many cycles (unit) GK must wait before
@@ -157,8 +154,34 @@ priority_from_delta_time(uint64_t present, uint64_t past)
 	return integer_log_base_2(delta_time);
 }
 
+static struct gk_fib *
+look_up_fib(struct gk_lpm *ltbl, struct ip_flow *flow)
+{
+	int fib_id;
+
+	if (flow->proto == ETHER_TYPE_IPv4) {
+		fib_id = lpm_lookup_ipv4(ltbl->lpm, flow->f.v4.dst);
+		if (fib_id < 0)
+			return NULL;
+		return &ltbl->fib_tbl[fib_id];
+	}
+
+	if (likely(flow->proto == ETHER_TYPE_IPv6)) {
+		fib_id = lpm_lookup_ipv6(ltbl->lpm6, flow->f.v6.dst);
+		if (fib_id < 0)
+			return NULL;
+		return &ltbl->fib_tbl6[fib_id];
+	}
+
+	rte_panic("Unexpected condition at %s: unknown flow type %hu\n",
+		__func__, flow->proto);
+
+	return NULL; /* Unreachable. */
+}
+
 static inline void
-initialize_flow_entry(struct flow_entry *fe, struct ip_flow *flow)
+initialize_flow_entry(struct flow_entry *fe,
+	struct ip_flow *flow, struct gk_fib *grantor_fib)
 {
 	rte_memcpy(&fe->flow, flow, sizeof(*flow));
 
@@ -166,8 +189,25 @@ initialize_flow_entry(struct flow_entry *fe, struct ip_flow *flow)
 	fe->u.request.last_packet_seen_at = rte_rdtsc();
 	fe->u.request.last_priority = START_PRIORITY;
 	fe->u.request.allowance = START_ALLOWANCE - 1;
-	/* TODO Grantor ID comes from LPM lookup. */
-	fe->u.request.grantor_id = 0;
+
+	/*
+	 * TODO Flow entries should maintain the reference counter of
+	 * the grantor FIB entry to avoid the entry to go away before the flow.
+	 *
+	 * Notice that all GK blocks are calling this function, so a solution
+	 * needs to deal with concurrency.
+	 *
+	 * Moreover, the chose solution must be very efficient due to
+	 * the impact on the throughout of the GK blocks. For example,
+	 * a simple atomic counter will slow down all GK blocks;
+	 * especially if there is only one grantor FIB entry.
+	 *
+	 * Ideas for solution: trade the need to maintain the reference counter
+	 * of the grantor FIB entry for some expensive operation that is only
+	 * needed while editing the FIB table.
+	 */
+	fe->grantor_fib = grantor_fib;
+	grantor_fib->ref_cnt++;
 }
 
 static inline void
@@ -177,8 +217,6 @@ reinitialize_flow_entry(struct flow_entry *fe, uint64_t now)
 	fe->u.request.last_packet_seen_at = now;
 	fe->u.request.last_priority = START_PRIORITY;
 	fe->u.request.allowance = START_ALLOWANCE - 1;
-	/* TODO Grantor ID comes from LPM lookup. */
-	fe->u.request.grantor_id = 0;
 }
 
 static inline int
@@ -196,16 +234,14 @@ drop_packet(struct rte_mbuf *pkt)
  * (3) put this encapsulated packet in the request queue.
  */
 static int
-gk_process_request(struct flow_entry *fe, struct ipacket *packet)
+gk_process_request(struct flow_entry *fe,
+	struct ipacket *packet)
 {
 	int ret;
 	uint64_t now = rte_rdtsc();
 	uint8_t priority = priority_from_delta_time(now,
 			fe->u.request.last_packet_seen_at);
-
-	/* TODO The tunnel information should come from the LPM table. */
-	struct ipip_tunnel_info tunnel;
-	memset(&tunnel, 0, sizeof(tunnel));
+	struct gk_fib *fib = fe->grantor_fib;
 
 	fe->u.request.last_packet_seen_at = now;
 
@@ -224,6 +260,10 @@ gk_process_request(struct flow_entry *fe, struct ipacket *packet)
 	}
 
 	/*
+	 * TODO If the nexthop MAC address is stale, then drop the packet.
+	 */
+
+	/*
 	 * Adjust @priority for the DSCP field.
 	 * DSCP 0 for legacy packets; 1 for granted packets; 
 	 * 2 for capability renew; 3-63 for requests.
@@ -235,9 +275,11 @@ gk_process_request(struct flow_entry *fe, struct ipacket *packet)
 	/* The assigned priority is @priority. */
 
 	/* Encapsulate the packet as a request. */
-	ret = encapsulate(packet->pkt, priority, &tunnel);
+	ret = encapsulate(packet->pkt, priority, &fib->u.grantor.flow);
 	if (ret < 0)
 		return ret;
+
+	/* TODO Fill up the Ethernet header of the packet. */
 
 	/* TODO Put this encapsulated packet in the request queue. */
 
@@ -258,10 +300,7 @@ gk_process_granted(struct flow_entry *fe, struct ipacket *packet)
 	uint8_t priority = PRIORITY_GRANTED;
 	uint64_t now = rte_rdtsc();
 	struct rte_mbuf *pkt = packet->pkt;
-
-	/* TODO The tunnel information should come from the LPM table. */
-	struct ipip_tunnel_info tunnel;
-	memset(&tunnel, 0, sizeof(tunnel));
+	struct gk_fib *fib = fe->grantor_fib;
 
 	if (now >= fe->u.granted.cap_expire_at) {
 		reinitialize_flow_entry(fe, now);
@@ -285,13 +324,19 @@ gk_process_granted(struct flow_entry *fe, struct ipacket *packet)
 	}
 
 	/*
+	 * TODO If the nexthop MAC address is stale, then drop the packet.
+	 */
+
+	/*
 	 * Encapsulate packet as a granted packet,
 	 * mark it as a capability renewal request if @renew_cap is true,
-	 * enter destination according to @fe->u.granted.grantor_id.
+	 * enter destination according to @fe->grantor_fib.
 	 */
-	ret = encapsulate(packet->pkt, priority, &tunnel);
+	ret = encapsulate(packet->pkt, priority, &fib->u.grantor.flow);
 	if (ret < 0)
 		return ret;
+
+	/* TODO Fill up the Ethernet header of the packet. */
 
 	/* TODO Put the encapsulated packet in the granted queue. */
 
@@ -311,7 +356,8 @@ gk_process_declined(struct flow_entry *fe, struct ipacket *packet)
 	return drop_packet(packet->pkt);
 }
 
-static int get_block_idx(struct gk_config *gk_conf, unsigned int lcore_id)
+static int
+get_block_idx(struct gk_config *gk_conf, unsigned int lcore_id)
 {
 	int i;
 	for (i = 0; i < gk_conf->num_lcores; i++)
@@ -387,32 +433,127 @@ out:
 }
 
 static void
-add_ggu_policy(struct ggu_policy *policy, struct gk_instance *instance)
+print_flow_err_msg(struct ip_flow *flow, const char *err_msg)
 {
-	int ret;
-	uint64_t now = rte_rdtsc();
-	struct flow_entry *fe;
-	uint32_t rss_hash_val = rss_ip_flow_hf(&policy->flow, 0, 0);
+	char src[128];
+	char dst[128];
 
-	ret = rte_hash_lookup_with_hash(instance->ip_flow_hash_table,
-		&policy->flow, rss_hash_val);
-	if (ret < 0) {
-		/* Create a new flow entry. */
-		ret = rte_hash_add_key_with_hash(
-			instance->ip_flow_hash_table,
- 			(void *)&policy->flow, rss_hash_val);
-		if (ret < 0) {
-			RTE_LOG(ERR, HASH,
-				"The GK block failed to add new key to hash table!\n");
+	if (flow->proto == ETHER_TYPE_IPv4) {
+		if (inet_ntop(AF_INET, &flow->f.v4.src,
+				src, sizeof(struct in_addr)) == NULL) {
+			RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv4 address (%s)\n",
+				__func__, strerror(errno));
 			return;
 		}
 
-		fe = &instance->ip_flow_entry_table[ret];
-		initialize_flow_entry(fe, &policy->flow);
+		if (inet_ntop(AF_INET, &flow->f.v4.dst,
+				dst, sizeof(struct in_addr)) == NULL) {
+			RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv4 address (%s)\n",
+				__func__, strerror(errno));
+			return;
+		}
+	} else if (likely(flow->proto == ETHER_TYPE_IPv6)) {
+		if (inet_ntop(AF_INET6, flow->f.v6.src,
+				src, sizeof(struct in6_addr)) == NULL) {
+			RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv6 address (%s)\n",
+				__func__, strerror(errno));
+			return;
+		}
+
+		if (inet_ntop(AF_INET6, flow->f.v6.dst,
+				dst, sizeof(struct in6_addr)) == NULL) {
+			RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv6 address (%s)\n",
+				__func__, strerror(errno));
+			return;
+		}
+	} else
+		rte_panic("Unexpected condition at %s: unknown flow type %hu!\n",
+			__func__, flow->proto);
+
+	RTE_LOG(ERR, GATEKEEPER,
+		"%s for the flow with IP source address %s, and destination address %s!\n",
+		err_msg, src, dst);
+}
+
+/*
+ * This function is only called when a policy from GGU block
+ * tries to add a new flow entry in the flow table.
+ *
+ * Notice, the function doesn't fully initialize the new flow entry,
+ * instead it only initializes the @flow and @grantor_fib fields.
+ */
+static struct flow_entry *
+add_new_flow_from_policy(
+	struct ggu_policy *policy, struct gk_instance *instance,
+	struct gk_lpm *ltbl, uint32_t rss_hash_val)
+{
+	int ret;
+	struct gk_fib *fib;
+	struct flow_entry *fe = NULL;
+
+	fib = look_up_fib(ltbl, &policy->flow);
+	if (fib == NULL || fib->action != GK_FWD_GRANTOR) {
+		/*
+		 * Drop this solicitation to add
+		 * a policy decision.
+		 */
+		char err_msg[128];
+		ret = snprintf(err_msg, sizeof(err_msg),
+			"gk: at %s initialize flow entry error", __func__);
+		RTE_VERIFY(ret > 0 && ret < (int)sizeof(err_msg));
+		print_flow_err_msg(&policy->flow, err_msg);
+		return NULL;
+	}
+
+	/* Create a new flow entry. */
+	ret = rte_hash_add_key_with_hash(
+		instance->ip_flow_hash_table,
+ 		&policy->flow, rss_hash_val);
+	if (ret < 0) {
+		RTE_LOG(ERR, HASH,
+			"The GK block failed to add new key to hash table in %s!\n",
+			__func__);
+		return NULL;
+	}
+
+	fe = &instance->ip_flow_entry_table[ret];
+	rte_memcpy(&fe->flow, &policy->flow, sizeof(fe->flow));
+
+	fe->grantor_fib = fib;
+	fib->ref_cnt++;
+
+	return fe;
+}
+
+static void
+add_ggu_policy(struct ggu_policy *policy,
+	struct gk_instance *instance, struct gk_lpm *ltbl)
+{
+	int ret;
+	uint64_t now = rte_rdtsc();
+	struct flow_entry *fe = NULL;
+	uint32_t rss_hash_val = rss_ip_flow_hf(&policy->flow, 0, 0);
+
+	/*
+	 * When the flow entry already exists,
+	 * the grantor ID should be already known.
+	 * Otherwise, Grantor ID comes from LPM lookup.
+	 */
+	ret = rte_hash_lookup_with_hash(instance->ip_flow_hash_table,
+		&policy->flow, rss_hash_val);
+	if (ret < 0) {
+		/*
+	 	 * This function only fills up GK_GRANTED and GK_DECLINED
+		 * states, so, it doesn't need to call initialize_flow_entry().
+		 */
+		fe = add_new_flow_from_policy(
+			policy, instance, ltbl, rss_hash_val);
+		if (fe == NULL)
+			return;
 	} else
 		fe = &instance->ip_flow_entry_table[ret];
 
-	switch(policy->state) {
+	switch (policy->state) {
 	case GK_GRANTED:
 		fe->state = GK_GRANTED;
 		fe->u.granted.cap_expire_at = now +
@@ -430,8 +571,6 @@ add_ggu_policy(struct ggu_policy *policy, struct gk_instance *instance)
 			now + cycle_from_second(1);
 		fe->u.granted.budget_byte =
 			fe->u.granted.tx_rate_kb_cycle * 1024;
-
-		/* TODO Fill up the grantor id field. */
 		break;
 
 	case GK_DECLINED:
@@ -448,11 +587,12 @@ add_ggu_policy(struct ggu_policy *policy, struct gk_instance *instance)
 }
 
 static void
-process_gk_cmd(struct gk_cmd_entry *entry, struct gk_instance *instance)
+process_gk_cmd(struct gk_cmd_entry *entry,
+	struct gk_instance *instance, struct gk_lpm *ltbl)
 {
-	switch(entry->op) {
+	switch (entry->op) {
 	case GGU_POLICY_ADD:
-		add_ggu_policy(&entry->u.ggu, instance);
+		add_ggu_policy(&entry->u.ggu, instance, ltbl);
 		break;
 
 	default:
@@ -546,34 +686,83 @@ gk_proc(void *arg)
 
 			/* 
 			 * Find the flow entry for the IP pair.
-			 * Create a new flow entry if not found.
+			 *
+			 * If the pair of source and destination addresses 
+			 * is in the flow table, proceed as the entry instructs,
+			 * and go to the next packet.
 			 */
 			ret = rte_hash_lookup_with_hash(
 				instance->ip_flow_hash_table,
 				&packet.flow, pkt->hash.rss);
-			if (ret < 0) {
-				/* Create a new flow entry. */
-				ret = rte_hash_add_key_with_hash(
-					instance->ip_flow_hash_table,
- 					(void *)&packet.flow, pkt->hash.rss);
-				if (ret < 0) {
-					RTE_LOG(ERR, HASH,
-						"The GK block failed to add new key to hash table!\n");
-					rte_pktmbuf_free(pkt);
+			if (ret >= 0)
+				fe = &instance->ip_flow_entry_table[ret];
+			else {
+				/*
+				 * Otherwise, look up the destination address
+			 	 * in the global LPM table.
+				 */
+				struct gk_fib *fib = look_up_fib(
+					&gk_conf->lpm_tbl, &packet.flow);
+
+			 	/*
+				 * No entry for the destination,
+				 * drop the packet.
+				 */
+				if (fib == NULL) {
+					print_flow_err_msg(&packet.flow,
+						"gk: failed to get the fib entry");
+					drop_packet(pkt);
 					continue;
 				}
 
-				fe = &instance->ip_flow_entry_table[ret];
-				initialize_flow_entry(fe, &packet.flow);
-			} else
-				fe = &instance->ip_flow_entry_table[ret];
+				switch (fib->action) {
+				case GK_FWD_GRANTOR:
+					/*
+			 		 * The entry instructs to enforce
+					 * policies over its packets,
+			 		 * initialize an entry in the
+					 * flow table, proceed as the
+					 * brand-new entry instructs, and
+			 		 * go to the next packet.
+			 		 */
+					ret = rte_hash_add_key_with_hash(
+						instance->ip_flow_hash_table,
+ 						&packet.flow, pkt->hash.rss);
+					if (ret < 0) {
+						RTE_LOG(ERR, HASH,
+						"The GK block failed to add new key to hash table!\n");
+						drop_packet(pkt);
+						continue;
+					}
 
-			/*
-			 * 1.1 If the pair of source and destination addresses 
-			 * is in the flow table, proceed as the entry instructs,
-			 * and go to the next packet.
-			 */
-			switch(fe->state) {
+					fe = &instance->
+						ip_flow_entry_table[ret];
+					initialize_flow_entry(fe,
+						&packet.flow, fib);
+					break;
+
+				case GK_FWD_BACK_NET:
+			 		/*
+					 * TODO The entry instructs to forward
+					 * its packets to the back interface,
+					 * forward accordingly.
+					 *
+					 * Implementing the BP block here.
+					 *
+					 * Notice that one needs to update
+					 * the Ethernet header.
+					 */
+					continue;
+
+				case GK_DROP:
+					/* FALLTHROUGH */
+				default:
+					drop_packet(pkt);
+					continue;
+				}
+			}
+
+			switch (fe->state) {
 			case GK_REQUEST:
 				ret = gk_process_request(fe, &packet);
 				break;
@@ -598,22 +787,6 @@ gk_proc(void *arg)
 				rte_pktmbuf_free(pkt);
 			else
 				tx_bufs[num_tx++] = pkt;
-
-			/*
-			 * TODO 1.2 Otherwise, look up the destination address
-			 * in the global LPM table.
-			 *
-			 * 1.2.1 If there is an entry for the destination and 
-			 * the entry instructs to enforce policies over its packets,
- 			 * initialize an entry in the flow table, proceed as the 
-			 * brand-new entry instructs, and go to the next packet.
-			 *
-			 * 1.2.2 If there is an entry for the destination and
-			 * the entry instructs to forward its packets to the
-			 * back interface, forward accordingly.
-			 *
-			 * 1.2.3 Otherwise, drop the packet.
-			 */
 		}
 
 		/* Send burst of TX packets, to second port of pair. */
@@ -631,7 +804,7 @@ gk_proc(void *arg)
                 	(void **)gk_cmds, GK_CMD_BURST_SIZE);
 
         	for (i = 0; i < num_cmd; i++) {
-			process_gk_cmd(gk_cmds[i], instance);
+			process_gk_cmd(gk_cmds[i], instance, &gk_conf->lpm_tbl);
 			mb_free_entry(&instance->mb, gk_cmds[i]);
         	}
 	}
@@ -646,6 +819,13 @@ struct gk_config *
 alloc_gk_conf(void)
 {
 	return rte_calloc("gk_config", 1, sizeof(struct gk_config), 0);
+}
+
+static void
+destroy_gk_lpm(struct gk_lpm *ltbl)
+{
+	destroy_ipv4_lpm(ltbl->lpm);
+	destroy_ipv6_lpm(ltbl->lpm6);
 }
 
 static int
@@ -665,6 +845,8 @@ cleanup_gk(struct gk_config *gk_conf)
                 destroy_mailbox(&gk_conf->instances[i].mb);
 	}
 
+	destroy_gk_lpm(&gk_conf->lpm_tbl);
+
 	rte_free(gk_conf->instances);
 	rte_free(gk_conf->lcores);
 	rte_free(gk_conf);
@@ -683,6 +865,551 @@ gk_conf_put(struct gk_config *gk_conf)
 		return cleanup_gk(gk_conf);
 
 	return 0;
+}
+
+static int
+setup_gk_lpm(struct gk_config *gk_conf, unsigned int socket_id)
+{
+	int ret;
+	struct rte_lpm_config ipv4_lpm_config;
+	struct rte_lpm6_config ipv6_lpm_config;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+
+	ipv4_lpm_config.max_rules = gk_conf->max_num_ipv4_rules;
+	ipv4_lpm_config.number_tbl8s = gk_conf->num_ipv4_tbl8s;
+	ipv6_lpm_config.max_rules = gk_conf->max_num_ipv6_rules;
+	ipv6_lpm_config.number_tbl8s = gk_conf->num_ipv6_tbl8s;
+
+	/*
+	 * The GK blocks only need to create one single IPv4 LPM table
+	 * on the @socket_id, so the @lcore and @identifier are set to 0.
+	 */
+	ltbl->lpm = init_ipv4_lpm("gk", &ipv4_lpm_config, socket_id, 0, 0);
+	if (ltbl->lpm == NULL) {
+		ret = -1;
+		goto out;
+	}
+
+	/*
+	 * The GK blocks only need to create one single IPv6 LPM table
+	 * on the @socket_id, so the @lcore and @identifier are set to 0.
+	 */
+	ltbl->lpm6 = init_ipv6_lpm("gk", &ipv6_lpm_config, socket_id, 0, 0);
+	if (ltbl->lpm6 == NULL) {
+		ret = -1;
+		goto free_lpm;
+	}
+
+	ret = 0;
+	goto out;
+
+free_lpm:
+	destroy_ipv4_lpm(ltbl->lpm);
+
+out:
+	return ret;
+}
+
+static int
+gk_lpm_add_ipv4_routes(
+	struct rte_lpm *lpm, struct ipv4_lpm_route *routes,
+	unsigned int num_routes, struct gk_lpm *ltbl)
+{
+	int ret = 0;
+	unsigned int i;
+	for (i = 0; i < num_routes; i++) {
+		ret = rte_lpm_add(lpm, routes[i].ip,
+			routes[i].depth, routes[i].nexthop);
+		if (ret < 0)
+			goto out;
+		ltbl->fib_tbl[routes[i].nexthop].ref_cnt++;
+	}
+
+out:
+	return ret;
+}
+
+static int
+gk_lpm_add_ipv6_routes(
+	struct rte_lpm6 *lpm, struct ipv6_lpm_route *routes,
+	unsigned int num_routes, struct gk_lpm *ltbl)
+{
+	int ret = 0;
+	unsigned int i;
+	for (i = 0; i < num_routes; i++) {
+		ret = rte_lpm6_add(lpm, routes[i].ip,
+			routes[i].depth, routes[i].nexthop);
+		if (ret < 0)
+			goto out;
+		ltbl->fib_tbl6[routes[i].nexthop].ref_cnt++;
+	}
+
+out:
+	return ret;
+}
+
+static int
+get_empty_fib_id(struct gk_fib *fib_tbl)
+{
+	int i;
+	for (i = 0; i < GK_MAX_NUM_FIB_ENTRIES; i++) {
+		if (fib_tbl[i].action == GK_FIB_MAX)
+			return i; 
+	}
+
+	RTE_LOG(WARNING, GATEKEEPER,
+		"gk: cannot find an empty fib entry in the LPM fib_tbl!\n");
+
+	return -1;
+}
+
+static struct gk_fib *
+add_prefix_fib(struct ipaddr *ip_addr,
+	int prefix_len, struct gk_config *gk_conf)
+{
+	int ret;
+	int fib_id = -1;
+	struct ipv4_lpm_route ipv4_route;
+	struct ipv6_lpm_route ipv6_route;
+	struct gk_fib *new_fib = NULL;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+
+	/* Find an empty fib entry for the IP address. */
+	if (ip_addr->proto == ETHER_TYPE_IPv4) {
+		if (!ipv4_if_configured(&gk_conf->net->back))
+			goto out;
+
+		fib_id = get_empty_fib_id(ltbl->fib_tbl);
+		if (fib_id < 0)
+			goto out;
+
+		new_fib = &ltbl->fib_tbl[fib_id];
+
+		/*
+		 * Add the fib entry for the IPv4 address
+		 * to the IPv4 LPM table.
+		 */
+		ipv4_route.ip = ip_addr->ip.v4.s_addr;
+		ipv4_route.depth = prefix_len;
+		ipv4_route.nexthop = fib_id;
+		ret = gk_lpm_add_ipv4_routes(
+			ltbl->lpm, &ipv4_route, 1, ltbl);
+		if (ret < 0)
+			goto out;
+	} else if (ip_addr->proto == ETHER_TYPE_IPv6) {
+		if (!ipv6_if_configured(&gk_conf->net->back))
+			goto out;
+
+		fib_id = get_empty_fib_id(ltbl->fib_tbl6);
+		if (fib_id < 0)
+			goto out;
+
+		new_fib = &ltbl->fib_tbl6[fib_id];
+
+		/*
+		 * Add the fib entry for the IPv6 address 
+		 * to the IPv6 LPM table.
+		 */
+		rte_memcpy(ipv6_route.ip,
+			ip_addr->ip.v6.s6_addr, sizeof(ipv6_route.ip));
+		ipv6_route.depth = prefix_len;
+		ipv6_route.nexthop = fib_id;
+		ret = gk_lpm_add_ipv6_routes(
+			ltbl->lpm6, &ipv6_route, 1, ltbl);
+		if (ret < 0)
+			goto out;
+	} else
+		goto out;
+
+out:
+	return new_fib;
+}
+
+static int
+parse_ip_prefix(const char *ip_prefix, struct ipaddr *res)
+{
+	/* Need to make copy to tokenize. */
+	size_t ip_prefix_len = strlen(ip_prefix);
+	char ip_prefix_copy[ip_prefix_len + 1];
+	char *ip_addr;
+
+	char *saveptr;
+	char *prefix_len_str;
+	char *end;
+	long prefix_len;
+	int ip_type;
+
+	strncpy(ip_prefix_copy, ip_prefix, ip_prefix_len + 1);
+
+	ip_addr = strtok_r(ip_prefix_copy, "/", &saveptr);
+	if (ip_addr == NULL)
+		return -1;
+
+	ip_type = get_ip_type(ip_addr);
+
+	prefix_len_str = strtok_r(NULL, "\0", &saveptr);
+	if (prefix_len_str == NULL)
+		return -1;
+
+	prefix_len = strtol(prefix_len_str, &end, 10);
+	if (prefix_len_str == end || !*prefix_len_str || *end) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: prefix length \"%s\" is not a number\n",
+			prefix_len_str);
+		return -1;
+	}
+
+	if ((prefix_len == LONG_MAX || prefix_len == LONG_MIN) &&
+			errno == ERANGE) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: prefix length \"%s\" caused underflow or overflow\n",
+			prefix_len_str);
+		return -1;
+	}
+
+	if (prefix_len < 0 || prefix_len > max_prefix_len(ip_type)) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: prefix length \"%s\" is out of range\n",
+			prefix_len_str);
+		return -1;
+	}
+
+	if (convert_str_to_ip(ip_addr, res) < 0) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: failed to convert ip prefix %s to a number!\n",
+			ip_prefix);
+		return -1;
+	}
+
+	return prefix_len;
+}
+
+static struct gk_fib *
+init_gateway_fib(struct ipaddr *gw_addr, struct ipaddr *ip_prefix_addr,
+	int ip_prefix_len, struct gk_config *gk_conf)
+{
+	int fib_id = -1;
+	struct gk_nexthop *nexthop;
+	struct gk_fib *gw_fib = NULL;
+	struct gk_fib *gt_fib = NULL;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+
+	if (gw_addr->proto != ip_prefix_addr->proto) {
+		RTE_LOG(ERR, GATEKEEPER,
+			"gk: failed to initialize a fib entry for gateway, since the gateway and its responsible grantors have different IP versions.\n");
+		goto out;
+	}
+
+	/* Find the fib entry for the gateway IP address. */
+	if (gw_addr->proto == ETHER_TYPE_IPv4) {
+		fib_id = lpm_lookup_ipv4(ltbl->lpm, gw_addr->ip.v4.s_addr);
+		if (fib_id < 0) {
+			gw_fib = add_prefix_fib(gw_addr,
+				(sizeof(struct in_addr) * 8), gk_conf);
+		} else
+			gw_fib = &ltbl->fib_tbl[fib_id];
+	} else if (gw_addr->proto == ETHER_TYPE_IPv6) {
+		fib_id = lpm_lookup_ipv6(ltbl->lpm6, gw_addr->ip.v6.s6_addr);
+		if (fib_id < 0) {
+			gw_fib = add_prefix_fib(gw_addr,
+				(sizeof(struct in6_addr) * 8), gk_conf);
+		} else
+			gw_fib = &ltbl->fib_tbl6[fib_id];
+	} else
+		rte_panic("Unexpected condiction: unknown IP type %hu at %s!\n",
+			gw_addr->proto, __func__);
+
+	if (gw_fib == NULL)
+		goto out;
+
+	/* Fill up the fib entry for the gateway. */
+	gw_fib->action = GK_FWD_GATEWAY;
+	nexthop = &gw_fib->u.nexthop;
+
+	rte_memcpy(&nexthop->ip_addr, gw_addr, sizeof(nexthop->ip_addr));
+
+	nexthop->eth_cache.stale = true;
+	nexthop->eth_cache.eth_hdr.ether_type = gw_addr->proto;
+
+	/*
+	 * Add a fib entry for the Grantor IP prefix,
+	 * for which the gateway is responsible.
+	 *
+	 * Notice, for this fib, it doesn't need to initialize the
+	 * fields @flow and @eth_cache, since it's only used to help
+	 * lookup the fib entry for the gateway.
+	 */
+	gt_fib = add_prefix_fib(ip_prefix_addr, ip_prefix_len, gk_conf);
+	if (gt_fib != NULL) {
+		gt_fib->action = GK_FWD_GRANTOR;
+		gt_fib->u.grantor.next_fib = gw_fib;
+		gt_fib->u.grantor.is_grantor_prefix_fib = true;
+		gw_fib->ref_cnt++;
+	}
+
+out:
+	return gw_fib;
+}
+
+static struct gk_fib *
+init_grantor_fib(struct ipaddr *gt_addr, struct gk_config *gk_conf)
+{
+	int fib_id = -1;
+	int prefix_len;
+	struct ip_flow *flow;
+	struct gk_fib *gt_fib = NULL;
+	struct gk_fib *gt_prefix_fib = NULL;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+
+	/* Find the fib entry for the Grantor IP prefix. */
+	if (gt_addr->proto == ETHER_TYPE_IPv4) {
+		fib_id = lpm_lookup_ipv4(ltbl->lpm, gt_addr->ip.v4.s_addr);
+		if (fib_id >= 0)
+			gt_prefix_fib = &ltbl->fib_tbl[fib_id];
+
+		prefix_len = sizeof(struct in_addr) * 8;
+	} else if (gt_addr->proto == ETHER_TYPE_IPv6) {
+		fib_id = lpm_lookup_ipv6(ltbl->lpm6, gt_addr->ip.v6.s6_addr);
+		if (fib_id >= 0)
+			gt_prefix_fib = &ltbl->fib_tbl6[fib_id];
+
+		prefix_len = sizeof(struct in6_addr) * 8;
+	} else
+		rte_panic("Unexpected condiction: unknown IP type %hu at %s!\n",
+			gt_addr->proto, __func__);
+
+	/* It's the fib entry for the Grantor. */
+	if (gt_prefix_fib && !gt_prefix_fib->u.grantor.is_grantor_prefix_fib)
+		return gt_prefix_fib;
+
+	gt_fib = add_prefix_fib(gt_addr, prefix_len, gk_conf);
+	if (gt_fib == NULL)
+		goto out;
+
+	gt_fib->action = GK_FWD_GRANTOR;
+	flow = &gt_fib->u.grantor.flow;
+
+	if (gt_addr->proto == ETHER_TYPE_IPv4) {
+		flow->proto = ETHER_TYPE_IPv4;
+		flow->f.v4.src = gk_conf->net->back.ip4_addr.s_addr;
+		flow->f.v4.dst = gt_addr->ip.v4.s_addr;
+	} else {
+		flow->proto = ETHER_TYPE_IPv6;
+		rte_memcpy(flow->f.v6.src,
+			gk_conf->net->back.ip6_addr.s6_addr,
+			sizeof(flow->f.v6.src));
+		rte_memcpy(flow->f.v6.dst,
+			gt_addr->ip.v6.s6_addr, sizeof(flow->f.v6.dst));
+	}
+
+	/* Fill up the @next_fib field in the @gt_fib. */
+
+	/* The Grantor server is an neighbor. */
+	if (gt_prefix_fib == NULL) {
+		gt_fib->u.grantor.eth_cache.stale = true;
+		gt_fib->u.grantor.eth_cache.eth_hdr.ether_type =
+			gt_addr->proto;
+		gt_fib->u.grantor.next_fib =
+			gt_addr->proto == ETHER_TYPE_IPv4 ?
+			ltbl->fib_tbl : ltbl->fib_tbl6;
+		gt_fib->u.grantor.next_fib->ref_cnt++;
+	} else {
+		gt_fib->u.grantor.next_fib =
+			gt_prefix_fib->u.grantor.next_fib;
+		gt_fib->u.grantor.next_fib->ref_cnt++;
+	}
+
+out:
+	return gt_fib;
+}
+
+static int
+add_fib_entry(struct lua_gk_fib *gk_fib, struct gk_config *gk_conf)
+{
+	int ret;
+
+	struct ipaddr gw_addr;
+	struct gk_fib *gw_fib = NULL;
+
+	struct ipaddr gt_addr;
+	struct gk_fib *gt_fib = NULL;
+
+	struct ipaddr ip_prefix_addr;
+	int ip_prefix_len;
+	struct gk_fib *ip_prefix_fib = NULL;
+
+	switch (gk_fib->action) {
+	case GK_FWD_GRANTOR: {
+
+		/* Initialize the fib entry for the Grantor. */
+		ret = convert_str_to_ip(gk_fib->grantor, &gt_addr);
+		if (ret < 0)
+			goto out;
+
+		gt_fib = init_grantor_fib(&gt_addr, gk_conf);
+		if (gt_fib == NULL) {
+			ret = -1;
+			goto out;
+		}
+
+		/* Initialize the fib entry for the IP prefix. */
+ 		ip_prefix_len = parse_ip_prefix(
+			gk_fib->ip_prefix, &ip_prefix_addr);
+		if (ip_prefix_len < 0) {
+			ret = -1;
+			goto out;
+		}
+
+		ip_prefix_fib = add_prefix_fib(
+			&ip_prefix_addr, ip_prefix_len, gk_conf);
+		if (ip_prefix_fib == NULL) {
+			ret = -1;
+			goto out;
+		}
+
+		rte_memcpy(ip_prefix_fib, gt_fib, sizeof(*ip_prefix_fib));
+		gt_fib->u.grantor.next_fib->ref_cnt++;
+
+		/*
+	 	 * XXX The nexthop MAC address should be
+	 	 * initialized only after NICs start.
+	 	 */
+		break;
+	}
+
+	case GK_FWD_GATEWAY:
+		/* Initialize the fib entry for the gateway. */
+		ret = convert_str_to_ip(gk_fib->gateway, &gw_addr);
+		if (ret < 0)
+			goto out;
+
+		ip_prefix_len = parse_ip_prefix(
+			gk_fib->ip_prefix, &ip_prefix_addr);
+		if (ip_prefix_len < 0) {
+			ret = -1;
+			goto out;
+		}
+
+		gw_fib = init_gateway_fib(&gw_addr,
+			&ip_prefix_addr, ip_prefix_len, gk_conf);
+		if (gw_fib == NULL) {
+			ret = -1;
+			goto out;
+		}
+
+		break;
+
+	case GK_FWD_BACK_NET:
+		/* FALLTHROUGH */
+	case GK_DROP:
+		/* Initialize the fib entry for the IP prefix. */
+ 		ip_prefix_len = parse_ip_prefix(
+			gk_fib->ip_prefix, &ip_prefix_addr);
+		if (ip_prefix_len < 0) {
+			ret = -1;
+			goto out;
+		}
+
+		ip_prefix_fib = add_prefix_fib(
+			&ip_prefix_addr, ip_prefix_len, gk_conf);
+		if (ip_prefix_fib == NULL) {
+			ret = -1;
+			goto out;
+		}
+
+		ip_prefix_fib->action = gk_fib->action;
+
+		break;
+
+	default:
+		RTE_LOG(ERR, GATEKEEPER,
+			"Unknown fib action %u\n",
+			gk_fib->action);
+		ret = -1;
+		goto out;
+	}
+
+	RTE_LOG(NOTICE, GATEKEEPER,
+		"gk: add a fib entry [ip prefix = %s, action = %u, grantor = %s, gateway = %s]\n",
+		gk_fib->ip_prefix, gk_fib->action,
+		gk_fib->grantor, gk_fib->gateway);
+
+	ret = 0;
+out:
+	return ret;
+}
+
+/* TODO Implement the addition of FIB entries to the dynamic configuration. */
+static int
+lua_init_fib_entries(struct gk_config *gk_conf,
+	struct lua_gk_fib *fib_entries, unsigned int num_fib_entries)
+{
+	unsigned int i;
+	int ret;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+
+	RTE_VERIFY(num_fib_entries <= GK_MAX_NUM_FIB_ENTRIES);
+
+	/* We use the first fib entry with action GK_FWD_NEIGHBOR. */
+	ltbl->fib_tbl[0].action = GK_FWD_NEIGHBOR;
+	ltbl->fib_tbl6[0].action = GK_FWD_NEIGHBOR;
+
+	for (i = 1; i < GK_MAX_NUM_FIB_ENTRIES; i++) {
+		ltbl->fib_tbl[i].action = GK_FIB_MAX;
+		ltbl->fib_tbl6[i].action = GK_FIB_MAX;
+	}
+
+	/* Initialize fib entries. */
+	for (i = 0; i < num_fib_entries; i++) {
+		ret = add_fib_entry(&fib_entries[i], gk_conf);
+		if (ret < 0)
+			goto out;
+	}
+
+	ret = 0;
+
+out:
+	return ret;
+}
+
+int
+lua_init_gk_lpm(
+	struct gk_config *gk_conf, struct net_config *net_conf,
+	struct lua_gk_fib *fib_entries, int num_fib_entries)
+{
+	int ret = 0;
+
+	if (net_conf == NULL || gk_conf == NULL) {
+		ret = -1;
+		goto out;
+	}
+
+	gk_conf->net = net_conf;
+
+	if (gk_conf->num_lcores <= 0)
+		goto out;
+
+	/*
+	 * Set up the GK LPM table. We assume that
+	 * all the GK instances are running on the same socket.
+	 */
+	ret = setup_gk_lpm(gk_conf,
+		rte_lcore_to_socket_id(gk_conf->lcores[0]));
+	if (ret < 0)
+		goto out;
+
+	/* Initialize the fib table. */
+	ret = lua_init_fib_entries(gk_conf, fib_entries, num_fib_entries);
+	if (ret < 0)
+		goto free_lpm;
+
+	return 0;
+
+free_lpm:
+	destroy_gk_lpm(&gk_conf->lpm_tbl);
+
+out:
+	return ret;
 }
 
 static int
@@ -719,7 +1446,7 @@ gk_stage1(void *arg)
 		}
 		inst_ptr->tx_queue_back = ret;
 
-		/* Setup the gk instance at @lcore. */
+		/* Setup the GK instance at @lcore. */
 		ret = setup_gk_instance(lcore, gk_conf);
 		if (ret < 0) {
 			RTE_LOG(ERR, GATEKEEPER,
@@ -733,10 +1460,41 @@ gk_stage1(void *arg)
 	return 0;
 }
 
+static void
+init_single_fib_mac(struct gk_fib *fib, struct gk_config *gk_conf)
+{
+	if (fib->action == GK_FWD_GATEWAY)
+		ether_addr_copy(&gk_conf->net->back.eth_addr,
+			&fib->u.nexthop.eth_cache.eth_hdr.s_addr);
+	else if (fib->action == GK_FWD_GRANTOR &&
+			fib->u.grantor.next_fib->action == GK_FWD_NEIGHBOR)
+		ether_addr_copy(&gk_conf->net->back.eth_addr,
+			&fib->u.grantor.eth_cache.eth_hdr.s_addr);
+}
+
+static void
+init_nexthop_mac(struct gk_config *gk_conf)
+{
+	unsigned int i;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+
+	/*
+	 * TODO The nexthop's destination MAC addresses must
+	 * come from the LLS block.
+	 */
+
+	/* Initialize the nexthop's source MAC address. */
+	for (i = 0; i < GK_MAX_NUM_FIB_ENTRIES; i++) {
+		init_single_fib_mac(&ltbl->fib_tbl[i], gk_conf);
+		init_single_fib_mac(&ltbl->fib_tbl6[i], gk_conf);
+	}
+}
+
 static int
 gk_stage2(void *arg)
 {
 	struct gk_config *gk_conf = arg;
+	init_nexthop_mac(gk_conf);
 	return gk_setup_rss(gk_conf);
 }
 
@@ -755,8 +1513,6 @@ run_gk(struct net_config *net_conf, struct gk_config *gk_conf)
 		ret = -1;
 		goto out;
 	}
-
-	gk_conf->net = net_conf;
 
 	if (gk_conf->num_lcores <= 0)
 		goto success;
@@ -822,7 +1578,7 @@ get_responsible_gk_mailbox(const struct ip_flow *flow,
 	shift = rss_hash_val % RTE_RETA_GROUP_SIZE;
 	queue_id = gk_conf->rss_conf.reta_conf[idx].reta[shift];
 
-	/* XXX Change mapping queue id to the gk instance id efficiently. */
+	/* XXX Change mapping queue id to the GK instance id efficiently. */
 	for (i = 0; i < gk_conf->num_lcores; i++)
 		if (gk_conf->instances[i].rx_queue_front == queue_id) {
 			block_idx = i;

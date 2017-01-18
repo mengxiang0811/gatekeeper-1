@@ -511,7 +511,7 @@ lua_free_iface(struct gatekeeper_if *iface)
 	destroy_iface(iface, IFACE_DESTROY_LUA);
 }
 
-static int
+int
 get_ip_type(const char *ip_addr)
 {
 	int ret;
@@ -542,13 +542,24 @@ get_ip_type(const char *ip_addr)
 	return ret;
 }
 
-static inline int
-max_prefix_len(int gk_type)
+int
+convert_str_to_ip(const char *ip_addr, struct ipaddr *res)
 {
-	RTE_VERIFY(gk_type == AF_INET || gk_type == AF_INET6);
-	return 8 * (gk_type == AF_INET
-		? sizeof(struct in_addr)
-		: sizeof(struct in6_addr));
+	int ip_type = get_ip_type(ip_addr);
+	if (ip_type == AF_INET) {
+		if (inet_pton(AF_INET, ip_addr, &res->ip.v4) != 1)
+			return -1;
+
+		res->proto = ETHER_TYPE_IPv4;
+	} else if (likely(ip_type == AF_INET6)) {
+		if (inet_pton(AF_INET6, ip_addr, &res->ip.v6) != 1)
+			return -1;
+
+		res->proto = ETHER_TYPE_IPv6;
+	} else
+		return -1;
+
+	return 0;
 }
 
 int
@@ -1095,7 +1106,7 @@ start_iface(struct gatekeeper_if *iface)
 
 out:
 	rte_eth_macaddr_get(iface->id, &iface->eth_addr);
-	if (iface->configured_proto & GK_CONFIGURED_IPV6)
+	if (ipv6_if_configured(iface))
 		setup_ipv6_addrs(iface);
 	return 0;
 

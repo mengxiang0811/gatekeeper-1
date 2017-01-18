@@ -20,6 +20,7 @@
 #define _GATEKEEPER_NET_H_
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <netinet/in.h>
 
 #include <rte_ethdev.h>
@@ -43,6 +44,17 @@ struct ipacket {
 	uint16_t        len;
 	/* The type of the next header, if present. */
 	uint8_t         next_hdr;
+};
+
+struct ipaddr {
+	/* The network layer protocol of the nexthop. */
+	uint16_t proto;
+
+	/* The IP address of the nexthop. */
+	union {
+		struct in_addr  v4;
+		struct in6_addr v6;
+	} ip;
 };
 
 /* Size of the secret key of the RSS hash. */
@@ -249,6 +261,8 @@ void lua_free_iface(struct gatekeeper_if *iface);
 
 int extract_packet_info(struct rte_mbuf *pkt, struct ipacket *packet);
 
+int get_ip_type(const char *ip_addr);
+int convert_str_to_ip(const char *ip_addr, struct ipaddr *res);
 int ethertype_filter_add(uint8_t port_id, uint16_t ether_type,
 	uint16_t queue_id);
 int ntuple_filter_add(uint8_t portid, uint32_t dst_ip,
@@ -261,6 +275,27 @@ int gatekeeper_get_rss_config(uint8_t portid,
 	struct gatekeeper_rss_config *rss_conf);
 int gatekeeper_init_network(struct net_config *net_conf);
 void gatekeeper_free_network(void);
+
+static inline bool
+ipv4_if_configured(struct gatekeeper_if *iface)
+{
+	return !!(iface->configured_proto & GK_CONFIGURED_IPV4);
+}
+
+static inline bool
+ipv6_if_configured(struct gatekeeper_if *iface)
+{
+	return !!(iface->configured_proto & GK_CONFIGURED_IPV6);
+}
+
+static inline int
+max_prefix_len(int ip_type)
+{
+	RTE_VERIFY(ip_type == AF_INET || ip_type == AF_INET6);
+	return ip_type == AF_INET
+		? sizeof(struct in_addr) * 8
+		: sizeof(struct in6_addr) * 8;
+}
 
 /*
  * Postpone the execution of f(arg) until the Lua configuration finishes,
