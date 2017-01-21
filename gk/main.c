@@ -716,6 +716,86 @@ out:
 }
 
 /* TODO Customize the hash function for IPv4. */
+static void
+gk_arp_and_nd_req_cb(const struct lls_map *map, void *arg,
+	__attribute__((unused))enum lls_reply_ty ty, int *pcall_again)
+{
+	struct ether_cache *eth_cache = arg;
+
+	/* TODO Add concurrency control by sequential lock on the nexthop entry. */
+	if (!map->stale) {
+		ether_addr_copy(&map->ha, &eth_cache->eth_hdr.d_addr);
+		eth_cache->stale = false;
+	} else
+		eth_cache->stale = true;
+
+	*pcall_again = true;
+}
+
+static int
+gk_hold_arp_and_nd(struct gk_fib *fib, unsigned int lcore_id)
+{
+	int ret;
+	void *ipv4;
+	void *ipv6;
+	struct ether_cache *eth_cache;
+
+	/*
+	 * Fib entry with action GK_FWD_GATEWAY_*_NET should
+	 * directly hold on the @nexthop field.
+	 *
+	 * Fib entry with action GK_FWD_GRANTOR should
+	 * be held according to its @next_fib field.
+	 *
+	 * Other fib entries won't reach here.
+	 */
+	if (fib->action == GK_FWD_GATEWAY_FRONT_NET ||
+			fib->action == GK_FWD_GATEWAY_BACK_NET) {
+		eth_cache = fib->u.gateway.eth_cache;
+		ipv4 = &fib->u.gateway.ip_addr.ip.v4;
+		ipv6 = &fib->u.gateway.ip_addr.ip.v6;
+	} else if (fib->action == GK_FWD_GRANTOR) {
+		/* The @next_fib indicates it's an gateway or an neighbor. */
+		if (fib->u.grantor.next_fib->action == GK_FWD_GATEWAY_FRONT_NET ||
+				fib->u.grantor.next_fib->action ==
+				GK_FWD_GATEWAY_BACK_NET) {
+			eth_cache = fib->u.grantor.
+				next_fib->u.gateway.eth_cache;
+			ipv4 = &fib->u.grantor.
+				next_fib->u.gateway.ip_addr.ip.v4;
+			ipv6 = &fib->u.grantor.
+				next_fib->u.gateway.ip_addr.ip.v6;
+		} else if (fib->u.grantor.next_fib->action ==
+				GK_FWD_NEIGHBOR_FRONT_NET ||
+				fib->u.grantor.next_fib->action ==
+				GK_FWD_NEIGHBOR_BACK_NET) {
+			eth_cache = fib->u.grantor.eth_cache;
+			ipv4 = &fib->u.grantor.flow.f.v4.dst;
+			ipv6 = fib->u.grantor.flow.f.v6.dst;
+		} else
+			rte_panic("Unexpected condition at %s: the gk fib @next_fib has unknown action (%d) for holding arp or nd!\n",
+				__func__, fib->u.grantor.next_fib->action);
+	} else
+		rte_panic("Unexpected condition at %s: the gk fib has unknown action (%d) for holding arp or nd!\n",
+			__func__, fib->action);
+
+	if (eth_cache->eth_hdr.ether_type == ETHER_TYPE_IPv4) {
+		ret = hold_arp(gk_arp_and_nd_req_cb,
+			eth_cache, ipv4, lcore_id);
+		if (ret < 0)
+			return ret;
+	} else if (likely(eth_cache->eth_hdr.ether_type ==
+			ETHER_TYPE_IPv6)) {
+		ret = hold_nd(gk_arp_and_nd_req_cb,
+			eth_cache, ipv6, lcore_id);
+		if (ret < 0)
+			return ret;
+	} else
+		rte_panic("Unexpected condition at %s: the nexthop information has unknown network type %hu\n",
+			__func__, eth_cache->eth_hdr.ether_type);
+
+	return 0;
+}
 
 static inline struct ether_cache *
 lookup_ether_cache(struct neighbor_hash_table *neigh_tbl, void *key)
@@ -1714,6 +1794,33 @@ add_fib_entry(struct lua_gk_fib *gk_fib, struct gk_config *gk_conf)
 		"gk: add a fib entry [ip prefix = %s, action = %u, grantor = %s, gateway = %s]\n",
 		gk_fib->ip_prefix, gk_fib->action,
 		gk_fib->grantor, gk_fib->gateway);
+
+	/*
+	 * Take care of the LLS communication
+	 * while editing the LPM table.
+	 *
+	 * Notice, we only need to do the LLS communication
+	 * when editing the nexthop fibs.
+	 *
+	 * We use the first lcore id as the parameter
+	 * to request the resolution.
+	 */
+	if (gw_fib != NULL) {
+		ret = gk_hold_arp_and_nd(gw_fib, gk_conf->lcores[0]);
+		if (ret < 0)
+			goto out;
+	}
+
+	if (gt_fib != NULL) {
+		ret = gk_hold_arp_and_nd(gt_fib, gk_conf->lcores[0]);
+		if (ret < 0)
+			goto out;
+	}
+
+	/*
+	 * XXX The nexthop MAC address should be
+	 * initialized only after NICs start.
+	 */
 
 	ret = 0;
 out:

@@ -210,6 +210,16 @@ struct lls_config {
 };
 
 /*
+ * TODO Enable an lcore to subscribe multiple times for the same IP address.
+ * This is needed because it's very hard for the GK blocks avoid duplicates.
+ * Currently, the LLS block has trouble with unsubscribing those duplicates
+ * since the LLS block identifies what to remove using
+ * the pair <IP_address, lcore_id>.
+ * In addition, the LLS block might not accept a subscription because
+ * it saves memory for a single subscription for lcore id.
+ */
+
+/*
  * Interface for functional blocks to resolve IPv4 --> Ethernet addresses.
  *
  * To obtain a map, a functional block running on @lcore_id should invoke
