@@ -133,6 +133,8 @@ struct gk_config {
 	unsigned int num_ipv4_tbl8s;
 	unsigned int max_num_ipv6_rules;
 	unsigned int num_ipv6_tbl8s;
+	unsigned int max_num_ipv6_neighbors;
+	int          gk_max_num_fib_entries;
 	/* This struct has hidden fields. */
 };
 
@@ -163,7 +165,8 @@ struct cps_config {
 };
 
 struct dynamic_config {
-	unsigned int   lcore_id;
+	unsigned int     lcore_id;
+	struct gk_config *gk;
 	/* This struct has hidden fields. */
 };
 
@@ -202,8 +205,8 @@ int run_cps(struct net_config *net_conf, struct cps_config *cps_conf,
 struct dynamic_config *get_dy_conf(void);
 void set_dyc_timeout(unsigned sec, unsigned usec,
 	struct dynamic_config *dy_conf);
-int run_dynamic_config(const char *server_path,
-	struct dynamic_config *dy_conf);
+int run_dynamic_config(struct gk_config *gk_conf,
+	const char *server_path, struct dynamic_config *dy_conf);
 
 ]]
 

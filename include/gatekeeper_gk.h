@@ -21,165 +21,17 @@
 
 #include <rte_atomic.h>
 
+#include "gatekeeper_fib.h"
 #include "gatekeeper_net.h"
 #include "gatekeeper_ipip.h"
 #include "gatekeeper_ggu.h"
 #include "gatekeeper_mailbox.h"
-#include "gatekeeper_lpm.h"
-
-/*
- * The LPM reserves 24-bit for the next-hop field.
- * TODO Drop the constant below and make it dynamic.
- */
-#define GK_MAX_NUM_FIB_ENTRIES (256)
 
 /*
  * A flow entry can be in one of three states:
  * request, granted, or declined.
  */
 enum gk_flow_state { GK_REQUEST, GK_GRANTED, GK_DECLINED };
-
-/* TODO Support more fib actions. */
-enum gk_fib_action {
-
-	/* Forward the packet to the corresponding Grantor. */
-	GK_FWD_GRANTOR,
-
-	/*
-	 * Forward the packet to the corresponding gateway
-	 * in the front network.
-	 */
-	GK_FWD_GATEWAY_FRONT_NET,
-
-	/*
-	 * Forward the packet to the corresponding gateway
-	 * in the back network.
-	 */
-	GK_FWD_GATEWAY_BACK_NET,
-
-	/*
-	 * The destination address is a neighbor in the front network.
-	 * Forward the packet to the destination directly.
-	 */
-	GK_FWD_NEIGHBOR_FRONT_NET,
-
-	/*
-	 * The destination address is a neighbor in the back network.
-	 * Forward the packet to the destination directly.
-	 */
-	GK_FWD_NEIGHBOR_BACK_NET,
-
-	/* Drop the packet. */
-	GK_DROP,
-
-	/* Invalid forward action. */
-	GK_FIB_MAX,
-};
-
-/* The Ethernet header cache. */
-struct ether_cache {
-
-	/* Indicate whether the MAC address is stale or not. */
-	bool stale;
-
-	/* The whole Ethernet header. */
-	struct ether_hdr eth_hdr;
-
-	/*
-	 * The count of how many times the LPM tables refer to it,
-	 * so a neighbor entry can go away only when no one referring to it.
-	 */
-	uint32_t ref_cnt;
-};
-
-struct neighbor_hash_table {
-	/* The hash table size. */
-	int tbl_size;
-
-	/* The tables that store the Ethernet headers. */
-	struct ether_cache *cache_tbl;
-
-	/* TODO Use a spin lock to edit the hash table. */
-	struct rte_hash *hash_table;
-};
-
-/* The gk forward information base (fib). */
-struct gk_fib {
-
-	/* The fib action. */
-	enum gk_fib_action   action;
-
-	/*
-	 * The count of how many times the LPM tables refer to it,
-	 * so a fib entry can go away only when no LPM entry referring to it.
-	 */
-	uint32_t             ref_cnt;
-
-	union {
-		/*
-	 	 * The nexthop information when the action is
-		 * GK_FWD_GATEWAY_*_NET.
-	 	 */
-		struct {
-			/* The IP address of the nexthop. */
-			struct ipaddr ip_addr;
-
-			/* The cached Ethernet header. */
-			struct ether_cache *eth_cache;
-		} gateway;
-
-		struct {
-			/*
-		 	 * When the action is GK_FWD_GRANTOR, we need
-			 * the next fib entry for either the gateway or
-			 * the grantor server itself as a neighbor.
-			 */
-			struct gk_fib *next_fib;
-
-			/*
-		 	 * When the action is GK_FWD_GRANTOR, we need
-			 * the IP flow information.
-		 	 */
-			struct ip_flow flow;
-
-			/*
-			 * Cache the whole Ethernet header when the @next_fib
-			 * action is GK_FWD_NEIGHBOR_*_NET.
-			 */
-			struct ether_cache *eth_cache;
-		} grantor;
-
-		/*
-		 * When the action is GK_FWD_NEIGHBOR_*_NET, it stores all
-		 * the neighbors' Ethernet headers in a hash table.
-		 * The entries can be accessed according to its IP address.
-		 */
-		struct neighbor_hash_table neigh;
-
-		struct neighbor_hash_table neigh6;
-	} u;
-};
-
-/* Structure for the GK global LPM table. */
-struct gk_lpm {
-	/* The IPv4 LPM table shared by the GK instances on the same socket. */
-	struct rte_lpm    *lpm;
-
-	/*
-	 * The fib table for IPv4 LPM table that
-	 * decides the actions on packets.
-	 */
-	struct gk_fib     fib_tbl[GK_MAX_NUM_FIB_ENTRIES];
-
-	/* The IPv6 LPM table shared by the GK instances on the same socket. */
-	struct rte_lpm6   *lpm6;
-
-	/*
-	 * The fib table for IPv6 LPM table that
-	 * decides the actions on packets.
-	 */
-	struct gk_fib     fib_tbl6[GK_MAX_NUM_FIB_ENTRIES];
-};
 
 /* Structures for each GK instance. */
 struct gk_instance {
@@ -218,6 +70,12 @@ struct gk_config {
 	unsigned int       max_num_ipv6_rules;
 	unsigned int       num_ipv6_tbl8s;
 
+	/* The maximum number of neighbor entries for the LPM FIB. */
+	unsigned int       max_num_ipv6_neighbors;
+
+	/* The LPM reserves 24-bit for the next-hop field. */
+	int                gk_max_num_fib_entries;
+
 	/*
 	 * The fields below are for internal use.
 	 * Configuration files should not refer to them.
@@ -232,6 +90,17 @@ struct gk_config {
 
 	struct gk_instance *instances;
 	struct net_config  *net;
+
+	/*
+	 * Store the neighbor FIB entries for the network prefixes.
+	 * The GK block will have a single neighbor FIB entry
+	 * per interface per IP version.
+	 */
+	struct gk_fib      *neigh_fib_front;
+	struct gk_fib      *neigh6_fib_front;
+	struct gk_fib      *neigh_fib_back;
+	struct gk_fib      *neigh6_fib_back;
+
 	/*
 	 * The LPM table used by the GK instances.
 	 * We assume that all the GK instances are
@@ -248,7 +117,10 @@ struct gk_config {
 };
 
 /* Define the possible command operations for GK block. */
-enum gk_cmd_op { GGU_POLICY_ADD, };
+enum gk_cmd_op {
+	GGU_POLICY_ADD,
+	GK_FLUSH_FLOW_TABLE,
+};
 
 /*
  * XXX Structure for each command. Add new fields to support more commands.
@@ -260,6 +132,7 @@ struct gk_cmd_entry {
 
 	union {
 		struct ggu_policy ggu;
+		struct gk_fib *fib;
 	} u;
 };
 

@@ -20,9 +20,12 @@ function gatekeeper_init()
 	local llsf = require("lls")
 	local lls_conf = llsf(net_conf, numa_table)
 
+	local gk_conf
+
 	if gatekeeper_server == true then
 		local gkf = require("gk")
-		local gk_conf, ggu_lcore = gkf(net_conf, numa_table)
+		local ggu_lcore
+		gk_conf, ggu_lcore = gkf(net_conf, numa_table)
 
 		local gguf = require("ggu")
 		local ggu_conf = gguf(net_conf, gk_conf, ggu_lcore)
@@ -37,7 +40,7 @@ function gatekeeper_init()
 	local cps_conf = cpsf(net_conf, lls_conf, numa_table)
 
 	local dyf = require("dyn_cfg")
-	local dy_conf = dyf(numa_table)
+	local dy_conf = dyf(gk_conf, numa_table)
 
 	return 0
 end

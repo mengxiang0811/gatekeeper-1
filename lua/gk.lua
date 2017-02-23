@@ -20,7 +20,8 @@ return function (net_conf, numa_table)
 	gk_conf.max_num_ipv6_rules = 1024
 	gk_conf.num_ipv6_tbl8s = 65536
 
- 	-- TODO Edit of the FIB table.
+	gk_conf.max_num_ipv6_neighbors = 65536
+	gk_conf.gk_max_num_fib_entries = 256
 
 	-- Setup the GK functional block.
 	local ret = gatekeeper.c.run_gk(net_conf, gk_conf)

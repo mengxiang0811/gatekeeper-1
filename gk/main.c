@@ -280,7 +280,6 @@ initialize_flow_entry(struct flow_entry *fe,
 	 * needed while editing the FIB table.
 	 */
 	fe->grantor_fib = grantor_fib;
-	grantor_fib->ref_cnt++;
 }
 
 static inline void
@@ -592,7 +591,6 @@ add_new_flow_from_policy(
 	rte_memcpy(&fe->flow, &policy->flow, sizeof(fe->flow));
 
 	fe->grantor_fib = fib;
-	fib->ref_cnt++;
 
 	return fe;
 }
@@ -659,6 +657,50 @@ add_ggu_policy(struct ggu_policy *policy,
 	}
 }
 
+/*
+ * Flushes flow entries that has
+ * a reference to @fib with an action GK_FWD_GRANTOR.
+ */
+static void
+gk_flush_a_grantor_in_flow_table(struct gk_fib *fib, struct gk_instance *instance)
+{
+	uint32_t next = 0;
+	int32_t index;
+	const struct ip_flow *key;
+	void *data;
+
+	index = rte_hash_iterate(instance->ip_flow_hash_table,
+		(void *)&key, &data, &next);
+	while (index >= 0) {
+		struct flow_entry *fe = &instance->ip_flow_entry_table[index];
+		if (fe->grantor_fib == fib) {
+			int ret = rte_hash_del_key(
+				instance->ip_flow_hash_table,
+				&fe->flow);
+			if (likely(ret >= 0))
+				memset(fe, 0, sizeof(*fe));
+			else if (ret == -EINVAL) {
+				RTE_LOG(ERR, HASH,
+					"gk: The parameters are invalid at %s",
+					__func__);
+			} else if (ret == -ENOENT) {
+				RTE_LOG(ERR, HASH,
+					"gk: The flow key is not found at %s",
+					__func__);
+			}
+		}
+
+		index = rte_hash_iterate(instance->ip_flow_hash_table,
+			(void *)&key, &data, &next);
+	}
+
+	rte_atomic16_inc(&fib->num_updated_instances);
+
+	RTE_LOG(NOTICE, GATEKEEPER,
+		"gk: finished flushing flow table at lcore %u\n",
+		rte_lcore_id());
+}
+
 static void
 process_gk_cmd(struct gk_cmd_entry *entry,
 	struct gk_instance *instance, struct gk_lpm *ltbl)
@@ -666,6 +708,10 @@ process_gk_cmd(struct gk_cmd_entry *entry,
 	switch (entry->op) {
 	case GGU_POLICY_ADD:
 		add_ggu_policy(&entry->u.ggu, instance, ltbl);
+		break;
+
+	case GK_FLUSH_FLOW_TABLE:
+		gk_flush_a_grantor_in_flow_table(entry->u.fib, instance);
 		break;
 
 	default:
@@ -713,19 +759,6 @@ gk_setup_rss(struct gk_config *gk_conf)
 
 out:
 	return ret;
-}
-
-/* TODO Customize the hash function for IPv4. */
-
-static inline struct ether_cache *
-lookup_ether_cache(struct neighbor_hash_table *neigh_tbl, void *key)
-{
-	int ret = rte_hash_lookup(neigh_tbl->hash_table, key);
-
-	if (ret < 0)
-		return NULL;
-
-	return &neigh_tbl->cache_tbl[ret];
 }
 
 /* Process the packets on the front interface. */
@@ -1133,7 +1166,18 @@ static void
 destroy_gk_lpm(struct gk_lpm *ltbl)
 {
 	destroy_ipv4_lpm(ltbl->lpm);
+
+	if (ltbl->fib_tbl != NULL) {
+		rte_free(ltbl->fib_tbl);
+		ltbl->fib_tbl = NULL;
+	}
+
 	destroy_ipv6_lpm(ltbl->lpm6);
+
+	if (ltbl->fib_tbl6 != NULL) {
+		rte_free(ltbl->fib_tbl6);
+		ltbl->fib_tbl6 = NULL;
+	}
 }
 
 static int
@@ -1151,6 +1195,20 @@ cleanup_gk(struct gk_config *gk_conf)
 				ip_flow_entry_table);
 
                 destroy_mailbox(&gk_conf->instances[i].mb);
+	}
+
+	for (i = 0; i < gk_conf->gk_max_num_fib_entries; i++) {
+		struct gk_fib *fib = &gk_conf->lpm_tbl.fib_tbl[i];
+		if (fib->action == GK_FWD_NEIGHBOR_FRONT_NET ||
+				fib->action == GK_FWD_NEIGHBOR_BACK_NET) {
+			destroy_neigh_hash_table(&fib->u.neigh);
+		}
+
+		fib = &gk_conf->lpm_tbl.fib_tbl6[i];
+		if (fib->action == GK_FWD_NEIGHBOR_FRONT_NET ||
+				fib->action == GK_FWD_NEIGHBOR_BACK_NET) {
+			destroy_neigh_hash_table(&fib->u.neigh6);
+		}
 	}
 
 	destroy_gk_lpm(&gk_conf->lpm_tbl);
@@ -1173,53 +1231,6 @@ gk_conf_put(struct gk_config *gk_conf)
 		return cleanup_gk(gk_conf);
 
 	return 0;
-}
-
-/*
- * XXX Only instantiate the LPM tables needed, for example,
- * there's no need for an IPv6 LPM table in an IPv4-only deployment.
- */
-static int
-setup_gk_lpm(struct gk_config *gk_conf, unsigned int socket_id)
-{
-	int ret;
-	struct rte_lpm_config ipv4_lpm_config;
-	struct rte_lpm6_config ipv6_lpm_config;
-	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
-
-	ipv4_lpm_config.max_rules = gk_conf->max_num_ipv4_rules;
-	ipv4_lpm_config.number_tbl8s = gk_conf->num_ipv4_tbl8s;
-	ipv6_lpm_config.max_rules = gk_conf->max_num_ipv6_rules;
-	ipv6_lpm_config.number_tbl8s = gk_conf->num_ipv6_tbl8s;
-
-	/*
-	 * The GK blocks only need to create one single IPv4 LPM table
-	 * on the @socket_id, so the @lcore and @identifier are set to 0.
-	 */
-	ltbl->lpm = init_ipv4_lpm("gk", &ipv4_lpm_config, socket_id, 0, 0);
-	if (ltbl->lpm == NULL) {
-		ret = -1;
-		goto out;
-	}
-
-	/*
-	 * The GK blocks only need to create one single IPv6 LPM table
-	 * on the @socket_id, so the @lcore and @identifier are set to 0.
-	 */
-	ltbl->lpm6 = init_ipv6_lpm("gk", &ipv6_lpm_config, socket_id, 0, 0);
-	if (ltbl->lpm6 == NULL) {
-		ret = -1;
-		goto free_lpm;
-	}
-
-	ret = 0;
-	goto out;
-
-free_lpm:
-	destroy_ipv4_lpm(ltbl->lpm);
-
-out:
-	return ret;
 }
 
 static int
@@ -1315,9 +1326,6 @@ cleanup:
 	return ret;
 }
 
-/*
- * TODO Implement the addition of FIB entries in the dynamic configuration.
- */
 int
 run_gk(struct net_config *net_conf, struct gk_config *gk_conf)
 {
