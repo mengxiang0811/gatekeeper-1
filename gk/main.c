@@ -313,6 +313,10 @@ gk_process_request(struct flow_entry *fe, struct ipacket *packet)
 	uint8_t priority = priority_from_delta_time(now,
 			fe->u.request.last_packet_seen_at);
 	struct gk_fib *fib = fe->grantor_fib;
+	unsigned seq;
+	bool stale = false;
+	struct ether_hdr *eth_hdr;
+	struct ether_cache *eth_cache;
 
 	fe->u.request.last_packet_seen_at = now;
 
@@ -330,9 +334,17 @@ gk_process_request(struct flow_entry *fe, struct ipacket *packet)
 		fe->u.request.allowance = START_ALLOWANCE - 1;
 	}
 
-	/*
-	 * TODO If the nexthop MAC address is stale, then drop the packet.
-	 */
+	eth_cache = fib->u.gateway.eth_cache;
+	if (eth_cache == NULL)
+		return -1;
+
+	do {
+		seq = read_seqbegin(&eth_cache->lock);
+		stale = eth_cache->stale;
+	} while (read_seqretry(&eth_cache->lock, seq));
+
+	if (stale)
+		return -1;
 
 	/*
 	 * Adjust @priority for the DSCP field.
@@ -350,7 +362,8 @@ gk_process_request(struct flow_entry *fe, struct ipacket *packet)
 	if (ret < 0)
 		return ret;
 
-	/* TODO Fill up the Ethernet header of the packet. */
+	eth_hdr = rte_pktmbuf_mtod(packet->pkt, struct ether_hdr *);
+	rte_memcpy(eth_hdr, &eth_cache->eth_hdr, sizeof(*eth_hdr));
 
 	/* TODO Put this encapsulated packet in the request queue. */
 
@@ -372,6 +385,10 @@ gk_process_granted(struct flow_entry *fe, struct ipacket *packet)
 	uint64_t now = rte_rdtsc();
 	struct rte_mbuf *pkt = packet->pkt;
 	struct gk_fib *fib = fe->grantor_fib;
+	unsigned seq;
+	bool stale = false;
+	struct ether_hdr *eth_hdr;
+	struct ether_cache *eth_cache;
 
 	if (now >= fe->u.granted.cap_expire_at) {
 		reinitialize_flow_entry(fe, now);
@@ -394,9 +411,17 @@ gk_process_granted(struct flow_entry *fe, struct ipacket *packet)
 		priority = PRIORITY_RENEW_CAP;
 	}
 
-	/*
-	 * TODO If the nexthop MAC address is stale, then drop the packet.
-	 */
+	eth_cache = fib->u.gateway.eth_cache;
+	if (eth_cache == NULL)
+		return -1;
+
+	do {
+		seq = read_seqbegin(&eth_cache->lock);
+		stale = eth_cache->stale;
+	} while (read_seqretry(&eth_cache->lock, seq));
+
+	if (stale)
+		return -1;
 
 	/*
 	 * Encapsulate packet as a granted packet,
@@ -407,7 +432,8 @@ gk_process_granted(struct flow_entry *fe, struct ipacket *packet)
 	if (ret < 0)
 		return ret;
 
-	/* TODO Fill up the Ethernet header of the packet. */
+	eth_hdr = rte_pktmbuf_mtod(packet->pkt, struct ether_hdr *);
+	rte_memcpy(eth_hdr, &eth_cache->eth_hdr, sizeof(*eth_hdr));
 
 	/* TODO Put the encapsulated packet in the granted queue. */
 
@@ -872,12 +898,26 @@ process_pkts_front(uint8_t port_front, uint8_t port_back,
 				 * Notice that one needs to update
 				 * the Ethernet header.
 				 *
-				 * TODO Add sequential lock to deal with the
+				 * Use sequential lock to deal with the
 				 * concurrency between GK and LLS on the cached
 				 * Ethernet header.
 				 */
+
+				unsigned seq;
+				bool stale = false;
+
 				eth_cache = fib->u.gateway.eth_cache;
-				if (eth_cache == NULL || eth_cache->stale) {
+				if (eth_cache == NULL) {
+					drop_packet(pkt);
+					continue;
+				}
+
+				do {
+					seq = read_seqbegin(&eth_cache->lock);
+					stale = eth_cache->stale;
+				} while (read_seqretry(&eth_cache->lock, seq));
+
+				if (stale) {
 					drop_packet(pkt);
 					continue;
 				}
@@ -896,6 +936,9 @@ process_pkts_front(uint8_t port_front, uint8_t port_back,
 				 * its packets to the neighbor in
 				 * the back network, forward accordingly.
 				 */
+				unsigned seq;
+				bool stale = false;
+
 				if (packet.flow.proto == ETHER_TYPE_IPv4) {
 					eth_cache = lookup_ether_cache(
 						&fib->u.neigh,
@@ -906,7 +949,17 @@ process_pkts_front(uint8_t port_front, uint8_t port_back,
 						packet.flow.f.v6.dst);
 				}
 
-				if (eth_cache == NULL || eth_cache->stale) {
+				if (eth_cache == NULL) {
+					drop_packet(pkt);
+					continue;
+				}
+
+				do {
+					seq = read_seqbegin(&eth_cache->lock);
+					stale = eth_cache->stale;
+				} while (read_seqretry(&eth_cache->lock, seq));
+
+				if (stale) {
 					drop_packet(pkt);
 					continue;
 				}
@@ -1032,12 +1085,25 @@ process_pkts_back(uint8_t port_back, uint8_t port_front,
 			 * Notice that one needs to update
 			 * the Ethernet header.
 			 *
-			 * TODO Add sequential lock to deal with the
+			 * Use sequential lock to deal with the
 			 * concurrency between GK and LLS on the cached
 			 * Ethernet header.
 			 */
+			unsigned seq;
+			bool stale = false;
+
 			eth_cache = fib->u.gateway.eth_cache;
-			if (eth_cache == NULL || eth_cache->stale) {
+			if (eth_cache == NULL) {
+				drop_packet(pkt);
+				continue;
+			}
+
+			do {
+				seq = read_seqbegin(&eth_cache->lock);
+				stale = eth_cache->stale;
+			} while (read_seqretry(&eth_cache->lock, seq));
+
+			if (stale) {
 				drop_packet(pkt);
 				continue;
 			}
@@ -1055,6 +1121,9 @@ process_pkts_back(uint8_t port_back, uint8_t port_front,
 			 * its packets to the neighbor in
 			 * the front network, forward accordingly.
 			 */
+			unsigned seq;
+			bool stale = false;
+
 			if (packet.flow.proto == ETHER_TYPE_IPv4) {
 				eth_cache = lookup_ether_cache(
 					&fib->u.neigh,
@@ -1065,7 +1134,17 @@ process_pkts_back(uint8_t port_back, uint8_t port_front,
 					packet.flow.f.v6.dst);
 			}
 
-			if (eth_cache == NULL || eth_cache->stale) {
+			if (eth_cache == NULL) {
+				drop_packet(pkt);
+				continue;
+			}
+
+			do {
+				seq = read_seqbegin(&eth_cache->lock);
+				stale = eth_cache->stale;
+			} while (read_seqretry(&eth_cache->lock, seq));
+
+			if (stale) {
 				drop_packet(pkt);
 				continue;
 			}

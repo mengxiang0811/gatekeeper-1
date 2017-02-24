@@ -24,6 +24,7 @@
 
 #include "gatekeeper_net.h"
 #include "gatekeeper_lpm.h"
+#include "seqlock.h"
 
 enum gk_fib_action {
 
@@ -63,6 +64,16 @@ enum gk_fib_action {
 
 /* The Ethernet header cache. */
 struct ether_cache {
+
+	/*
+	 * The sequential lock to deal with the
+	 * concurrency between GK and LLS on the cached
+	 * Ethernet header.
+	 *
+	 * Notice that, the LLS block will only modify
+	 * the @stale and @eth_hdr.d_addr fields.
+	 */
+	seqlock_t        lock;
 
 	/* Indicate whether the MAC address is stale or not. */
 	bool             stale;

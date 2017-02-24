@@ -18,6 +18,7 @@
 
 #include "gatekeeper_fib.h"
 #include "gatekeeper_gk.h"
+#include "gatekeeper_lls.h"
 #include "gatekeeper_main.h"
 
 void
@@ -214,7 +215,7 @@ static int
 setup_neighbor_tbl(unsigned int socket_id, int identifier,
 	int ip_ver, int ht_size, struct neighbor_hash_table *neigh)
 {
-	int  ret;
+	int  i, ret;
 	char ht_name[64];
 	int key_len = ip_ver == ETHER_TYPE_IPv4 ?
 		sizeof(struct in_addr) : sizeof(struct in6_addr);
@@ -252,6 +253,10 @@ setup_neighbor_tbl(unsigned int socket_id, int identifier,
 		ret = -1;
 		goto neigh_hash;
 	}
+
+	/* Initialize the sequential lock for each Ethernet cache entry. */
+	for (i = 0; i < ht_size; i++)
+		seqlock_init(&neigh->cache_tbl[i].lock);
 
 	ret = 0;
 	goto out;
@@ -607,7 +612,10 @@ del_fib_entry_locked(const char *ip_prefix, struct gk_config *gk_conf)
 
 		/* Decrement the @ref_cnt of the @next_fib entry. */
 		ip_prefix_fib->u.grantor.next_fib->ref_cnt--;
+
+		write_seqlock(&eth_cache->lock);
 		eth_cache->ref_cnt--;
+		write_sequnlock(&eth_cache->lock);
 
 		/*
 		 * The Grantor is a neighbor, and the prefix
@@ -627,12 +635,15 @@ del_fib_entry_locked(const char *ip_prefix, struct gk_config *gk_conf)
 				 * referenced by another prefix, so we cannot
 				 * release this FIB entry.
 				 */
+				write_seqlock(&eth_cache->lock);
 				if (eth_cache->ref_cnt != 0) {
 					RTE_LOG(ERR, GATEKEEPER,
 						"gk: delete a grantor neighbor fib entry [ip prefix = %s], however, its cached Ethernet header is referenced by other entries\n",
 						ip_prefix);
+					write_sequnlock(&eth_cache->lock);
 					return -1;
 				}
+				write_sequnlock(&eth_cache->lock);
 
 				/*
 				 * Find the neighbor FIB entry
@@ -650,14 +661,19 @@ del_fib_entry_locked(const char *ip_prefix, struct gk_config *gk_conf)
 					return -1;
 				}
 
+				put_arp((struct in_addr *)&flow->f.v4.dst,
+					gk_conf->lcores[0]);
+
 				/*
-				 * TODO Add concurrency control to
+				 * Add concurrency control to
 				 * reset the Ethernet cache entry.
 				 */
+				write_seqlock(&eth_cache->lock);
 				eth_cache->stale = false;
 				memset(&eth_cache->eth_hdr, 0,
 					sizeof(eth_cache->eth_hdr));
 				eth_cache->ref_cnt = 0;
+				write_sequnlock(&eth_cache->lock);
 			} else if (flow->proto == ETHER_TYPE_IPv6 &&
 					memcmp(flow->f.v6.dst,
 					ip_prefix_addr.ip.v6.s6_addr,
@@ -667,12 +683,15 @@ del_fib_entry_locked(const char *ip_prefix, struct gk_config *gk_conf)
 				 * referenced by another prefix, so we cannot
 				 * release this FIB entry.
 				 */
+				write_seqlock(&eth_cache->lock);
 				if (eth_cache->ref_cnt != 0) {
 					RTE_LOG(ERR, GATEKEEPER,
 						"gk: delete a grantor neighbor fib entry [ip prefix = %s], however, its cached Ethernet header is referenced by other entries\n",
 						ip_prefix);
+					write_sequnlock(&eth_cache->lock);
 					return -1;
 				}
+				write_sequnlock(&eth_cache->lock);
 
 				/*
 				 * Find the neighbor FIB entry
@@ -690,14 +709,19 @@ del_fib_entry_locked(const char *ip_prefix, struct gk_config *gk_conf)
 					return -1;
 				}
 
+				put_nd((struct in6_addr *)flow->f.v6.dst,
+					gk_conf->lcores[0]);
+
 				/*
-				 * TODO Add concurrency control to
+				 * Add concurrency control to
 				 * reset the Ethernet cache entry.
 				 */
+				write_seqlock(&eth_cache->lock);
 				eth_cache->stale = false;
 				memset(&eth_cache->eth_hdr, 0,
 					sizeof(eth_cache->eth_hdr));
 				eth_cache->ref_cnt = 0;
+				write_sequnlock(&eth_cache->lock);
 			}
 		}
 
@@ -714,7 +738,9 @@ del_fib_entry_locked(const char *ip_prefix, struct gk_config *gk_conf)
 		struct ether_cache *eth_cache =
 			ip_prefix_fib->u.gateway.eth_cache;
 
+		write_seqlock(&eth_cache->lock);
 		eth_cache->ref_cnt--;
+		write_sequnlock(&eth_cache->lock);
 
 		/*
 		 * Find the FIB entry for the gateway.
@@ -728,12 +754,15 @@ del_fib_entry_locked(const char *ip_prefix, struct gk_config *gk_conf)
 			 * referenced by another prefix, so we cannot
 			 * release this FIB entry.
 			 */
+			write_seqlock(&eth_cache->lock);
 			if (eth_cache->ref_cnt != 0) {
 				RTE_LOG(ERR, GATEKEEPER,
 					"gk: delete a gateway fib entry [ip prefix = %s], however, its cached Ethernet header is referenced by other entries\n",
 					ip_prefix);
+				write_sequnlock(&eth_cache->lock);
 				return -1;
 			}
+			write_sequnlock(&eth_cache->lock);
 
 			if (ip_prefix_fib->action == GK_FWD_GATEWAY_FRONT_NET)
 				neigh_fib = gk_conf->neigh_fib_front;
@@ -750,14 +779,19 @@ del_fib_entry_locked(const char *ip_prefix, struct gk_config *gk_conf)
 				return -1;
 			}
 
+			put_arp((struct in_addr *)&gw_addr->ip.v4.s_addr,
+				gk_conf->lcores[0]);
+
 			/*
-			 * TODO Add concurrency control to
+			 * Add concurrency control to
 			 * reset the Ethernet cache entry.
 			 */
+			write_seqlock(&eth_cache->lock);
 			eth_cache->stale = false;
 			memset(&eth_cache->eth_hdr, 0,
 				sizeof(eth_cache->eth_hdr));
 			eth_cache->ref_cnt = 0;
+			write_sequnlock(&eth_cache->lock);
 		} else if (gw_addr->proto == ETHER_TYPE_IPv6 &&
 				memcmp(gw_addr->ip.v6.s6_addr,
 				ip_prefix_addr.ip.v6.s6_addr,
@@ -767,12 +801,15 @@ del_fib_entry_locked(const char *ip_prefix, struct gk_config *gk_conf)
 			 * referenced by another prefix, so we cannot
 			 * release this FIB entry.
 			 */
+			write_seqlock(&eth_cache->lock);
 			if (eth_cache->ref_cnt != 0) {
 				RTE_LOG(ERR, GATEKEEPER,
 					"gk: delete a gateway fib entry [ip prefix = %s], however, its cached Ethernet header is referenced by other entries\n",
 					ip_prefix);
+				write_sequnlock(&eth_cache->lock);
 				return -1;
 			}
+			write_sequnlock(&eth_cache->lock);
 
 			if (ip_prefix_fib->action == GK_FWD_GATEWAY_FRONT_NET)
 				neigh_fib = gk_conf->neigh6_fib_front;
@@ -789,14 +826,19 @@ del_fib_entry_locked(const char *ip_prefix, struct gk_config *gk_conf)
 				return -1;
 			}
 
+			put_nd((struct in6_addr *)gw_addr->ip.v6.s6_addr,
+				gk_conf->lcores[0]);
+
 			/*
-			 * TODO Add concurrency control to
+			 * Add concurrency control to
 			 * reset the Ethernet cache entry.
 			 */
+			write_seqlock(&eth_cache->lock);
 			eth_cache->stale = false;
 			memset(&eth_cache->eth_hdr, 0,
 				sizeof(eth_cache->eth_hdr));
 			eth_cache->ref_cnt = 0;
+			write_sequnlock(&eth_cache->lock);
 		}
 
 		break;
@@ -1015,6 +1057,8 @@ init_gateway_fib(const char *ip_prefix, enum gk_fib_action action,
 		&gw_addr, sizeof(gw_fib->u.gateway.ip_addr));
 
 	gw_fib->u.gateway.eth_cache = eth_cache;
+
+	write_seqlock(&eth_cache->lock);
 	eth_cache->stale = true;
 	eth_cache->eth_hdr.ether_type = gw_addr.proto;
 
@@ -1027,6 +1071,7 @@ init_gateway_fib(const char *ip_prefix, enum gk_fib_action action,
 	}
 
 	eth_cache->ref_cnt++;
+	write_sequnlock(&eth_cache->lock);
 
 	/*
 	 * Add a fib entry for the IP prefix,
@@ -1046,7 +1091,9 @@ init_gateway_fib(const char *ip_prefix, enum gk_fib_action action,
 
 		ip_prefix_fib->u.gateway.eth_cache = eth_cache;
 
+		write_seqlock(&eth_cache->lock);
 		eth_cache->ref_cnt++;
+		write_sequnlock(&eth_cache->lock);
 	} else {
 		del_fib_entry(gateway, gk_conf);
 		return NULL;
@@ -1164,8 +1211,9 @@ init_grantor_fib(const char *ip_prefix,
 		gt_fib->u.grantor.eth_cache =
 			gt_prefix_fib->u.gateway.eth_cache;
 
-		/* TODO Add concurrency control. */
+		write_seqlock(&gt_fib->u.grantor.eth_cache->lock);
 		gt_fib->u.grantor.eth_cache->ref_cnt++;
+		write_sequnlock(&gt_fib->u.grantor.eth_cache->lock);
 
 		goto out;
 	}
@@ -1191,6 +1239,7 @@ init_grantor_fib(const char *ip_prefix,
 		}
 	}
 
+	write_seqlock(&eth_cache->lock);
 	eth_cache->stale = true;
 	eth_cache->eth_hdr.ether_type = gt_addr.proto;
 
@@ -1199,6 +1248,7 @@ init_grantor_fib(const char *ip_prefix,
 		&eth_cache->eth_hdr.s_addr);
 
 	eth_cache->ref_cnt++;
+	write_sequnlock(&eth_cache->lock);
 
 	gt_fib->u.grantor.eth_cache = eth_cache;
 	gt_fib->u.grantor.next_fib = gt_prefix_fib;
@@ -1214,7 +1264,10 @@ out:
 		rte_memcpy(&ip_prefix_fib->u,
 			&gt_fib->u, sizeof(ip_prefix_fib->u));
 
+		write_seqlock(&ip_prefix_fib->u.grantor.eth_cache->lock);
 		ip_prefix_fib->u.grantor.eth_cache->ref_cnt++;
+		write_sequnlock(&ip_prefix_fib->u.grantor.eth_cache->lock);
+
 		gt_fib->u.grantor.next_fib->ref_cnt++;
 	} else {
 		del_fib_entry(grantor, gk_conf);
@@ -1222,6 +1275,101 @@ out:
 	}
 
 	return gt_fib;
+}
+
+static void
+gk_arp_and_nd_req_cb(const struct lls_map *map, void *arg,
+	__attribute__((unused))enum lls_reply_ty ty, int *pcall_again)
+{
+	struct ether_cache *eth_cache = arg;
+
+	/*
+	 * Deal with concurrency control by sequential lock
+	 * on the nexthop entry.
+	 */
+	write_seqlock(&eth_cache->lock);
+
+	if (!map->stale) {
+		ether_addr_copy(&map->ha, &eth_cache->eth_hdr.d_addr);
+		eth_cache->stale = false;
+	} else
+		eth_cache->stale = true;
+
+	write_sequnlock(&eth_cache->lock);
+
+	if (pcall_again != NULL)
+		*pcall_again = true;
+}
+
+static int
+gk_hold_arp_and_nd(struct gk_fib *fib, unsigned int lcore_id)
+{
+	int ret;
+	void *ipv4;
+	void *ipv6;
+	unsigned seq;
+	uint16_t ether_type;
+	struct ether_cache *eth_cache;
+
+	/*
+	 * Fib entry with action GK_FWD_GATEWAY_*_NET should
+	 * directly hold on the @nexthop field.
+	 *
+	 * Fib entry with action GK_FWD_GRANTOR should
+	 * be held according to its @next_fib field.
+	 *
+	 * Other fib entries won't reach here.
+	 */
+	if (fib->action == GK_FWD_GATEWAY_FRONT_NET ||
+			fib->action == GK_FWD_GATEWAY_BACK_NET) {
+		eth_cache = fib->u.gateway.eth_cache;
+		ipv4 = &fib->u.gateway.ip_addr.ip.v4;
+		ipv6 = &fib->u.gateway.ip_addr.ip.v6;
+	} else if (fib->action == GK_FWD_GRANTOR) {
+		/* The @next_fib indicates it's an gateway or an neighbor. */
+		if (fib->u.grantor.next_fib->action == GK_FWD_GATEWAY_FRONT_NET ||
+				fib->u.grantor.next_fib->action ==
+				GK_FWD_GATEWAY_BACK_NET) {
+			eth_cache = fib->u.grantor.
+				next_fib->u.gateway.eth_cache;
+			ipv4 = &fib->u.grantor.
+				next_fib->u.gateway.ip_addr.ip.v4;
+			ipv6 = &fib->u.grantor.
+				next_fib->u.gateway.ip_addr.ip.v6;
+		} else if (fib->u.grantor.next_fib->action ==
+				GK_FWD_NEIGHBOR_FRONT_NET ||
+				fib->u.grantor.next_fib->action ==
+				GK_FWD_NEIGHBOR_BACK_NET) {
+			eth_cache = fib->u.grantor.eth_cache;
+			ipv4 = &fib->u.grantor.flow.f.v4.dst;
+			ipv6 = fib->u.grantor.flow.f.v6.dst;
+		} else
+			rte_panic("Unexpected condition at %s: the gk fib @next_fib has unknown action (%d) for holding arp or nd!\n",
+				__func__, fib->u.grantor.next_fib->action);
+	} else
+		rte_panic("Unexpected condition at %s: the gk fib has unknown action (%d) for holding arp or nd!\n",
+			__func__, fib->action);
+
+	do {
+		seq = read_seqbegin(&eth_cache->lock);
+		ether_type = eth_cache->eth_hdr.ether_type;
+	} while (read_seqretry(&eth_cache->lock, seq));
+
+	if (ether_type == ETHER_TYPE_IPv4) {
+		ret = hold_arp(gk_arp_and_nd_req_cb,
+			eth_cache, ipv4, lcore_id);
+		if (ret < 0)
+			return ret;
+	} else if (likely(ether_type == ETHER_TYPE_IPv6)) {
+		ret = hold_nd(gk_arp_and_nd_req_cb,
+			eth_cache, ipv6, lcore_id);
+		if (ret < 0)
+			return ret;
+	} else
+		rte_panic("Unexpected condition at %s: the nexthop information has unknown network type %hu\n",
+			__func__, ether_type);
+
+	return 0;
 }
 
 static struct gk_fib *
@@ -1256,14 +1404,26 @@ add_fib_entry_locked(const char *ip_prefix, enum gk_fib_action action,
 	switch (action) {
 	case GK_FWD_GRANTOR: {
 
+		int ret;
 		struct gk_fib *gt_fib = init_grantor_fib(
 			ip_prefix, grantor_or_gateway, gk_conf);
 		if (gt_fib == NULL)
 			return -1;
 
 		/*
-	 	 * TODO The nexthop MAC address should be initialized.
-	 	 */
+		 * Take care of the LLS communication
+		 * while editing the LPM table.
+		 *
+		 * Notice, we only need to do the LLS communication
+		 * when editing the nexthop fibs.
+		 *
+		 * We use the first lcore id as the parameter
+		 * to request the resolution.
+		 */
+		ret = gk_hold_arp_and_nd(gt_fib, gk_conf->lcores[0]);
+		if (ret < 0)
+			return -1;
+
 		break;
 	}
 
@@ -1271,14 +1431,26 @@ add_fib_entry_locked(const char *ip_prefix, enum gk_fib_action action,
 		/* FALLTHROUGH */
 	case GK_FWD_GATEWAY_BACK_NET: {
 
+		int ret;
 		struct gk_fib *gw_fib = init_gateway_fib(ip_prefix,
 			action, grantor_or_gateway, gk_conf);
 		if (gw_fib == NULL)
 			return -1;
 
 		/*
-	 	 * TODO The nexthop MAC address should be initialized.
-	 	 */
+		 * Take care of the LLS communication
+		 * while editing the LPM table.
+		 *
+		 * Notice, we only need to do the LLS communication
+		 * when editing the nexthop fibs.
+		 *
+		 * We use the first lcore id as the parameter
+		 * to request the resolution.
+		 */
+		ret = gk_hold_arp_and_nd(gw_fib, gk_conf->lcores[0]);
+		if (ret < 0)
+			return -1;
+
 		break;
 	}
 
