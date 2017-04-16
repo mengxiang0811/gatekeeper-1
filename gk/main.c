@@ -54,6 +54,9 @@
 /* XXX Sample parameters, need to be tested for better performance. */
 #define GK_CMD_BURST_SIZE        (32)
 
+/* Length of time (in seconds) to wait between scans of the flow table. */
+#define FLOW_TABLE_SCAN_INTERVAL_SEC (5)
+
 /* Store information about a packet. */
 struct ipacket {
 	/* Flow identifier for this packet. */
@@ -63,6 +66,9 @@ struct ipacket {
 };
 
 struct flow_entry {
+	/* The timestamp that the flow entry used last time. */
+	time_t last_active_ts;
+
 	/* IP flow information. */
 	struct ip_flow flow;
 
@@ -479,6 +485,43 @@ get_block_idx(struct gk_config *gk_conf, unsigned int lcore_id)
 	return 0;
 }
 
+static void
+gk_flow_tbl_scan(__attribute__((unused)) struct rte_timer *timer, void *arg)
+{
+	uint32_t next = 0;
+	int32_t index;
+	const struct ip_flow *key;
+	void *data;
+	time_t now = time(NULL);
+	struct gk_instance *instance = (struct gk_instance *)arg;
+
+	RTE_VERIFY(now >= 0);
+	index = rte_hash_iterate(instance->ip_flow_hash_table,
+		(void *)&key, &data, &next);
+	while (index >= 0) {
+		struct flow_entry *fe = &instance->ip_flow_entry_table[index];
+		if (now - fe->last_active_ts >= instance->flow_timeout_sec) {
+			int ret = rte_hash_del_key(
+				instance->ip_flow_hash_table,
+				&fe->flow);
+			if (likely(ret >= 0))
+				memset(fe, 0, sizeof(*fe));
+			else if (ret == -EINVAL) {
+				RTE_LOG(ERR, HASH,
+					"gk: The parameters are invalid at %s",
+					__func__);
+			} else if (ret == -ENOENT) {
+				RTE_LOG(ERR, HASH,
+					"gk: The flow key is not found at %s",
+					__func__);
+			}
+		}
+
+		index = rte_hash_iterate(instance->ip_flow_hash_table,
+			(void *)&key, &data, &next);
+	}
+}
+
 static int
 setup_gk_instance(unsigned int lcore_id, struct gk_config *gk_conf)
 {
@@ -489,11 +532,14 @@ setup_gk_instance(unsigned int lcore_id, struct gk_config *gk_conf)
 
 	struct gk_instance *instance = &gk_conf->instances[block_idx];
 	struct rte_hash_parameters ip_flow_hash_params = {
-		.entries = gk_conf->flow_ht_size,
+		.entries = gk_conf->init_flow_ht_size,
 		.key_len = sizeof(struct ip_flow),
 		.hash_func = rss_ip_flow_hf,
 		.hash_func_init_val = 0,
 	};
+
+	instance->flow_ht_size = gk_conf->init_flow_ht_size;
+	instance->flow_timeout_sec = gk_conf->flow_timeout_sec;
 
 	ret = snprintf(ht_name, sizeof(ht_name), "ip_flow_hash_%u", block_idx);
 	RTE_VERIFY(ret > 0 && ret < (int)sizeof(ht_name));
@@ -515,7 +561,7 @@ setup_gk_instance(unsigned int lcore_id, struct gk_config *gk_conf)
 
 	/* Setup the flow entry table for GK block @block_idx. */
 	instance->ip_flow_entry_table = (struct flow_entry *)rte_calloc(NULL,
-		gk_conf->flow_ht_size, sizeof(struct flow_entry), 0);
+		gk_conf->init_flow_ht_size, sizeof(struct flow_entry), 0);
 	if (instance->ip_flow_entry_table == NULL) {
 		RTE_LOG(ERR, MALLOC,
 			"The GK block can't create flow entry table at lcore %u!\n",
@@ -530,9 +576,26 @@ setup_gk_instance(unsigned int lcore_id, struct gk_config *gk_conf)
     	if (ret < 0)
         	goto flow_entry;
 
+	/*
+	 * Do flow table scan every FLOW_TABLE_SCAN_INTERVAL_SEC seconds.
+	 * If the call fails, the cleanup_gk() function will stop all
+	 * the scan timers.
+	 */
+	ret = rte_timer_reset(&instance->scan_timer,
+		FLOW_TABLE_SCAN_INTERVAL_SEC * rte_get_timer_hz(), PERIODICAL,
+		lcore_id, gk_flow_tbl_scan, instance);
+	if (ret < 0) {
+		RTE_LOG(ERR, TIMER,
+			"Cannot set GK flow table scan timer at lcore %u\n",
+			lcore_id);
+		goto mailbox;
+	}
+
 	ret = 0;
 	goto out;
 
+mailbox:
+	destroy_mailbox(&instance->mb);
 flow_entry:
     	rte_free(instance->ip_flow_entry_table);
     	instance->ip_flow_entry_table = NULL;
@@ -586,6 +649,100 @@ print_flow_err_msg(struct ip_flow *flow, const char *err_msg)
 		err_msg, src, dst);
 }
 
+static int
+expand_flow_table(unsigned int lcore_id,
+	struct gk_instance *instance, struct gk_config *gk_conf)
+{
+	int  ret;
+	char ht_name[64];
+	unsigned int block_idx = get_block_idx(gk_conf, lcore_id);
+	unsigned int socket_id = rte_lcore_to_socket_id(lcore_id);
+	unsigned int new_flow_ht_size = (instance->flow_ht_size << 1);
+
+	struct rte_hash_parameters ip_flow_hash_params = {
+		.entries = new_flow_ht_size,
+		.key_len = sizeof(struct ip_flow),
+		.hash_func = rss_ip_flow_hf,
+		.hash_func_init_val = 0,
+	};
+
+	struct rte_hash *ip_flow_hash_table;
+	struct flow_entry *ip_flow_entry_table;
+
+	uint32_t next = 0;
+	int32_t index;
+	const struct ip_flow *key;
+	void *data;
+
+	instance->flow_ht_size = new_flow_ht_size;
+
+	ret = snprintf(ht_name, sizeof(ht_name), "ip_flow_hash_%u_%u",
+		block_idx, new_flow_ht_size);
+	RTE_VERIFY(ret > 0 && ret < (int)sizeof(ht_name));
+
+	/* Setup the flow hash table for GK block @block_idx. */
+	ip_flow_hash_params.name = ht_name;
+	ip_flow_hash_params.socket_id = socket_id;
+	ip_flow_hash_table = rte_hash_create(&ip_flow_hash_params);
+	if (ip_flow_hash_table == NULL) {
+		RTE_LOG(ERR, HASH,
+			"The GK block cannot expand hash table at lcore %u!\n",
+			lcore_id);
+
+		ret = -1;
+		goto out;
+	}
+	/* Set a new hash compare function other than the default one. */
+	rte_hash_set_cmp_func(ip_flow_hash_table, ip_flow_cmp_eq);
+
+	/* Setup the flow entry table for GK block @block_idx. */
+	ip_flow_entry_table = (struct flow_entry *)rte_calloc(NULL,
+		new_flow_ht_size, sizeof(struct flow_entry), 0);
+	if (ip_flow_entry_table == NULL) {
+		RTE_LOG(ERR, MALLOC,
+			"The GK block can't expand flow entry table at lcore %u!\n",
+			lcore_id);
+
+		ret = -1;
+		goto flow_hash;
+	}
+
+	index = rte_hash_iterate(instance->ip_flow_hash_table,
+		(void *)&key, &data, &next);
+	while (index >= 0) {
+		struct flow_entry *fe =
+			&instance->ip_flow_entry_table[index];
+
+		int succ = rte_hash_add_key(ip_flow_hash_table, fe);
+		if (succ >= 0) {
+			rte_memcpy(&ip_flow_entry_table[succ],
+				fe, sizeof(ip_flow_entry_table[succ]));
+		} else {
+			RTE_LOG(ERR, HASH,
+				"The GK block failed to add new key to the expanded hash table in %s!\n",
+				__func__);
+		}
+
+		index = rte_hash_iterate(instance->ip_flow_hash_table,
+			(void *)&key, &data, &next);
+	}
+
+	rte_free(instance->ip_flow_hash_table);
+	rte_free(instance->ip_flow_entry_table);
+
+	instance->ip_flow_hash_table = ip_flow_hash_table;
+	instance->ip_flow_entry_table = ip_flow_entry_table;
+
+	ret = 0;
+	goto out;
+
+flow_hash:
+	rte_hash_free(ip_flow_hash_table);
+	ip_flow_hash_table = NULL;
+out:
+	return ret;
+}
+
 /*
  * This function is only called when a policy from GGU block
  * tries to add a new flow entry in the flow table.
@@ -594,15 +751,15 @@ print_flow_err_msg(struct ip_flow *flow, const char *err_msg)
  * instead it only initializes the @flow and @grantor_fib fields.
  */
 static struct flow_entry *
-add_new_flow_from_policy(
-	struct ggu_policy *policy, struct gk_instance *instance,
-	struct gk_lpm *ltbl, uint32_t rss_hash_val)
+add_new_flow_from_policy(struct ggu_policy *policy,
+	unsigned int lcore_id, struct gk_instance *instance,
+	struct gk_config *gk_conf, uint32_t rss_hash_val)
 {
 	int ret;
 	struct gk_fib *fib;
 	struct flow_entry *fe;
 
-	fib = look_up_fib(ltbl, &policy->flow);
+	fib = look_up_fib(&gk_conf->lpm_tbl, &policy->flow);
 	if (fib == NULL || fib->action != GK_FWD_GRANTOR) {
 		/*
 		 * Drop this solicitation to add
@@ -616,15 +773,28 @@ add_new_flow_from_policy(
 		return NULL;
 	}
 
-	/* Create a new flow entry. */
+	/*
+	 * We double the hash table size to alleviate memory pressure
+	 * when the table is full.
+	 */
+hash_add_policy_flow:
 	ret = rte_hash_add_key_with_hash(
 		instance->ip_flow_hash_table,
  		&policy->flow, rss_hash_val);
-	if (ret < 0) {
+	if (ret == -EINVAL) {
 		RTE_LOG(ERR, HASH,
-			"The GK block failed to add new key to hash table in %s!\n",
+			"The GK block failed to add new key to hash table in %s with invalid parameters!\n",
 			__func__);
 		return NULL;
+	} else if (ret == -ENOSPC) {
+		RTE_LOG(WARNING, HASH,
+			"The GK block failed to add new key to hash table in %s due to lack of space!\n",
+			__func__);
+		ret = expand_flow_table(lcore_id, instance, gk_conf);
+		if (ret < 0)
+			return NULL;
+
+		goto hash_add_policy_flow;
 	}
 
 	fe = &instance->ip_flow_entry_table[ret];
@@ -636,8 +806,8 @@ add_new_flow_from_policy(
 }
 
 static void
-add_ggu_policy(struct ggu_policy *policy,
-	struct gk_instance *instance, struct gk_lpm *ltbl)
+add_ggu_policy(struct ggu_policy *policy, unsigned int lcore_id,
+	struct gk_instance *instance, struct gk_config *gk_conf)
 {
 	int ret;
 	uint64_t now = rte_rdtsc();
@@ -658,7 +828,7 @@ add_ggu_policy(struct ggu_policy *policy,
 		 * need to call initialize_flow_entry().
 		 */
 		fe = add_new_flow_from_policy(
-			policy, instance, ltbl, rss_hash_val);
+			policy, lcore_id, instance, gk_conf, rss_hash_val);
 		if (fe == NULL)
 			return;
 	} else
@@ -763,12 +933,12 @@ gk_synchronize(struct gk_fib *fib, struct gk_instance *instance)
 }
 
 static void
-process_gk_cmd(struct gk_cmd_entry *entry,
-	struct gk_instance *instance, struct gk_lpm *ltbl)
+process_gk_cmd(struct gk_cmd_entry *entry, unsigned int lcore_id,
+	struct gk_instance *instance, struct gk_config *gk_conf)
 {
 	switch (entry->op) {
 	case GGU_POLICY_ADD:
-		add_ggu_policy(&entry->u.ggu, instance, ltbl);
+		add_ggu_policy(&entry->u.ggu, lcore_id, instance, gk_conf);
 		break;
 
 	case GK_SYNCH_WITH_LPM:
@@ -909,6 +1079,10 @@ process_pkts_front(uint8_t port_front, uint8_t port_back,
 			switch (fib->action) {
 			case GK_FWD_GRANTOR:
 				/*
+				 * We double the hash table size to
+				 * alleviate memory pressure
+				 * when the table is full.
+				 *
 				 * The entry instructs to enforce
 				 * policies over its packets,
 			 	 * initialize an entry in the
@@ -916,14 +1090,27 @@ process_pkts_front(uint8_t port_front, uint8_t port_back,
 				 * brand-new entry instructs, and
 			 	 * go to the next packet.
 			 	 */
+hash_add_pkt_flow:
 				ret = rte_hash_add_key_with_hash(
 					instance->ip_flow_hash_table,
  					&packet.flow, pkt->hash.rss);
-				if (ret < 0) {
+				if (ret == -EINVAL) {
 					RTE_LOG(ERR, HASH,
-						"The GK block failed to add new key to hash table!\n");
+						"The GK block failed to add new key to hash table in %s with invalid parameters!\n",
+						__func__);
 					drop_packet(pkt);
 					continue;
+				} else if (ret == -ENOSPC) {
+					RTE_LOG(WARNING, HASH,
+						"The GK block failed to add new key to hash table in %s due to lack of space!\n",
+						__func__);
+					ret = expand_flow_table(lcore, instance, gk_conf);
+					if (ret < 0) {
+						drop_packet(pkt);
+						continue;
+					}
+
+					goto hash_add_pkt_flow;
 				}
 
 				fe = &instance->ip_flow_entry_table[ret];
@@ -1200,7 +1387,7 @@ process_pkts_back(uint8_t port_back, uint8_t port_front,
 }
 
 static void
-process_cmds_from_mailbox(
+process_cmds_from_mailbox(unsigned int lcore_id,
 	struct gk_instance *instance, struct gk_config *gk_conf)
 {
 	int i;
@@ -1212,7 +1399,7 @@ process_cmds_from_mailbox(
                	(void **)gk_cmds, GK_CMD_BURST_SIZE);
 
         for (i = 0; i < num_cmd; i++) {
-		process_gk_cmd(gk_cmds[i], instance, &gk_conf->lpm_tbl);
+		process_gk_cmd(gk_cmds[i], lcore_id, instance, gk_conf);
 		mb_free_entry(&instance->mb, gk_cmds[i]);
         }
 }
@@ -1246,7 +1433,7 @@ gk_proc(void *arg)
 			rx_queue_back, tx_queue_front,
 			lcore, gk_conf);
 
-		process_cmds_from_mailbox(instance, gk_conf);
+		process_cmds_from_mailbox(lcore, instance, gk_conf);
 	}
 
 	RTE_LOG(NOTICE, GATEKEEPER,
@@ -1292,7 +1479,8 @@ cleanup_gk(struct gk_config *gk_conf)
 				ip_flow_entry_table);
 		}
 
-                destroy_mailbox(&gk_conf->instances[i].mb);
+		destroy_mailbox(&gk_conf->instances[i].mb);
+		rte_timer_stop(&gk_conf->instances[i].scan_timer);
 	}
 
 	for (ui = 0; ui < gk_conf->gk_max_num_ipv4_fib_entries; ui++) {
@@ -1340,7 +1528,14 @@ gk_stage1(void *arg)
 	gk_conf->instances = rte_calloc(__func__, gk_conf->num_lcores,
 		sizeof(struct gk_instance), 0);
 	if (gk_conf->instances == NULL)
-		goto cleanup;
+		goto out;
+
+	/*
+	 * The timer handled by rte_timer_stop() must have been initialized
+	 * using rte_timer_init(), otherwise, undefined behavior will occur.
+	 */
+	for (i = 0; i < gk_conf->num_lcores; i++)
+		rte_timer_init(&gk_conf->instances[i].scan_timer);
 
 	/*
 	 * Set up the GK LPM table. We assume that
@@ -1403,6 +1598,7 @@ gk_stage1(void *arg)
 
 cleanup:
 	cleanup_gk(gk_conf);
+out:
 	return -1;
 }
 

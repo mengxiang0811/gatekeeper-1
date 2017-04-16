@@ -43,8 +43,18 @@ enum gk_flow_state { GK_REQUEST, GK_GRANTED, GK_DECLINED };
 
 /* Structures for each GK instance. */
 struct gk_instance {
+	/* Specify the size of the flow hash table for the instance. */
+	unsigned int	  flow_ht_size;
+
 	struct rte_hash   *ip_flow_hash_table;
 	struct flow_entry *ip_flow_entry_table;
+	/* Timer to scan over the flow entries. */
+	struct rte_timer  scan_timer;
+	/*
+	 * The timeout in seconds that the inactive
+	 * flow entry becomes expired.
+	 */
+	unsigned int      flow_timeout_sec;
 	/* RX queue on the front interface. */
 	uint16_t          rx_queue_front;
 	/* TX queue on the front interface. */
@@ -58,8 +68,8 @@ struct gk_instance {
 
 /* Configuration for the GK functional block. */
 struct gk_config {
-	/* Specify the size of the flow hash table. */
-	unsigned int	   flow_ht_size;
+	/* Specify the initial size of the flow hash table. */
+	unsigned int       init_flow_ht_size;
 
 	/*
 	 * DPDK LPM library implements the DIR-24-8 algorithm
@@ -87,6 +97,11 @@ struct gk_config {
 	 */
 	unsigned int       gk_max_num_ipv4_fib_entries;
 	unsigned int       gk_max_num_ipv6_fib_entries;
+
+	/*
+	 * The timeout in seconds used to prune expired flow entries.
+	 */
+	unsigned int       flow_timeout_sec;
 
 	/*
 	 * The fields below are for internal use.

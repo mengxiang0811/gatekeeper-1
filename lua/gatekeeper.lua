@@ -137,6 +137,7 @@ struct gk_config {
 	unsigned int max_num_ipv6_neighbors;
 	unsigned int gk_max_num_ipv4_fib_entries;
 	unsigned int gk_max_num_ipv6_fib_entries;
+	unsigned int flow_timeout_sec;
 	/* This struct has hidden fields. */
 };
 

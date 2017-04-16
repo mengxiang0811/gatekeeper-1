@@ -15,6 +15,7 @@ return function (net_conf, sol_conf, gk_lcores)
 	gk_conf.num_ipv4_tbl8s = 256
 	gk_conf.max_num_ipv6_rules = 1024
 	gk_conf.num_ipv6_tbl8s = 65536
+	gk_conf.flow_timeout_sec = 10
 
 	gk_conf.max_num_ipv6_neighbors = 65536
 	gk_conf.gk_max_num_ipv4_fib_entries = 256

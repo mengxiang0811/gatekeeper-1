@@ -138,7 +138,7 @@ main(int argc, char **argv)
 	/* XXX Set the global log level. Change it as needed. */
 	rte_set_log_level(RTE_LOG_DEBUG);
 
-	/* Used by the LLS block. */
+	/* Used by the LLS and GK blocks. */
 	rte_timer_subsystem_init();
 
 	/* Given the nature of signal, it's okay to not have a cleanup for them. */
