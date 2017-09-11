@@ -65,9 +65,6 @@ struct gatekeeper_rss_config {
 	struct rte_eth_rss_reta_entry64 reta_conf[GATEKEEPER_RETA_MAX_SIZE];
 };
 
-/* Maximum number of ACL classification types. */
-#define GATEKEEPER_IPV6_ACL_MAX (8)
-
 /*
  * Format of function called when a rule matches in the IPv6 ACL.
  * Need forward declaration because acl_cb_func and struct gatekeeper_if
@@ -104,6 +101,9 @@ struct gatekeeper_if {
 
 	/* The type of bonding used for this interface, if needed. */
 	uint32_t        bonding_mode;
+
+	/* Maximum number of ACL classification types. */
+	uint8_t         gatekeeper_ipv6_acl_max;
 
 	/*
 	 * The fields below are for internal use.
@@ -212,7 +212,7 @@ struct gatekeeper_if {
 	 * On error, these functions should return a negative value
 	 * and free all packets that have not already been handled.
 	 */
-	acl_cb_func        acl_funcs[GATEKEEPER_IPV6_ACL_MAX];
+	acl_cb_func        *acl_funcs;
 
 	/*
 	 * Callback functions for each ACL rule type with
@@ -221,7 +221,7 @@ struct gatekeeper_if {
 	 * Returning values: 0 means a match and a negative value
 	 * means an error or that there was no match.
 	 */
-	ext_cb_func        ext_funcs[GATEKEEPER_IPV6_ACL_MAX];
+	ext_cb_func        *ext_funcs;
 
 	/* Number of ACL types installed in @acl_funcs. */
 	unsigned int       acl_func_count;
@@ -256,6 +256,9 @@ struct net_config {
 	 * for Grantor.
 	 */
 	int                  back_iface_enabled;
+
+	/* Number of attempts to wait for a link to come up. */
+	uint8_t              num_attempts_link_get;
 
 	/*
 	 * The fields below are for internal use.

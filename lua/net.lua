@@ -5,6 +5,8 @@ return function (gatekeeper_server)
 	-- Change these parameters to configure the network.
 	--
 
+	local num_attempts_link_get = 5
+
 	local front_ports = {"enp133s0f0"}
 	-- Each interface should have at most two ip addresses:
 	-- 1 IPv4, 1 IPv6.
@@ -25,10 +27,13 @@ return function (gatekeeper_server)
 	--
 
 	local net_conf = gatekeeper.c.get_net_conf()
+	net_conf.num_attempts_link_get = num_attempts_link_get
+
 	local front_iface = gatekeeper.c.get_if_front(net_conf)
 	front_iface.arp_cache_timeout_sec = front_arp_cache_timeout_sec
 	front_iface.nd_cache_timeout_sec = front_nd_cache_timeout_sec
 	front_iface.bonding_mode = front_bonding_mode
+	front_iface.gatekeeper_ipv6_acl_max = 8
 	local ret = gatekeeper.init_iface(front_iface, "front",
 		front_ports, front_ips)
 
@@ -38,6 +43,7 @@ return function (gatekeeper_server)
 		back_iface.arp_cache_timeout_sec = back_arp_cache_timeout_sec
 		back_iface.nd_cache_timeout_sec = back_nd_cache_timeout_sec
 		back_iface.bonding_mode = back_bonding_mode
+		back_iface.gatekeeper_ipv6_acl_max = 8
 		ret = gatekeeper.init_iface(back_iface, "back",
 			back_ports, back_ips)
 	end

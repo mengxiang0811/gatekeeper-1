@@ -199,7 +199,7 @@ register_ipv6_acl(struct ipv6_acl_rule *ipv6_rules, unsigned int num_rules,
 	unsigned int numa_nodes = get_net_conf()->numa_nodes;
 	unsigned int i;
 
-	if (iface->acl_func_count == GATEKEEPER_IPV6_ACL_MAX) {
+	if (iface->acl_func_count == iface->gatekeeper_ipv6_acl_max) {
 		RTE_LOG(ERR, GATEKEEPER, "acl: cannot install more ACL types on the %s iface\n",
 			iface->name);
 		return -1;
@@ -335,6 +335,18 @@ init_ipv6_acls(struct gatekeeper_if *iface)
 	unsigned int numa_nodes = get_net_conf()->numa_nodes;
 	unsigned int i;
 
+	iface->acl_funcs = rte_calloc(
+		"acl_funcs", iface->gatekeeper_ipv6_acl_max,
+		sizeof(acl_cb_func), 0);
+	if (iface->acl_funcs == NULL)
+		return -1;
+
+	iface->ext_funcs = rte_calloc(
+		"ext_funcs", iface->gatekeeper_ipv6_acl_max,
+		sizeof(ext_cb_func), 0);
+	if (iface->ext_funcs == NULL)
+		goto free_acl_funcs;
+
 	for (i = 0; i < numa_nodes; i++) {
 		char acl_name[64];
 		struct rte_acl_param acl_params = {
@@ -357,7 +369,8 @@ init_ipv6_acls(struct gatekeeper_if *iface)
 				rte_acl_free(iface->ipv6_acls[i]);
 				iface->ipv6_acls[i] = NULL;
 			}
-			return -1;
+
+			goto free_ext_funcs;
 		}
 	}
 
@@ -368,6 +381,16 @@ init_ipv6_acls(struct gatekeeper_if *iface)
 	iface->acl_func_count = 1;
 
 	return 0;
+
+free_ext_funcs:
+	rte_free(iface->ext_funcs);
+	iface->ext_funcs = NULL;
+
+free_acl_funcs:
+	rte_free(iface->acl_funcs);
+	iface->acl_funcs = NULL;
+
+	return -1;
 }
 
 void

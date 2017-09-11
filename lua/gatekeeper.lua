@@ -119,11 +119,13 @@ struct gatekeeper_if {
 	uint32_t arp_cache_timeout_sec;
 	uint32_t nd_cache_timeout_sec;
 	uint32_t bonding_mode;
+	uint8_t  gatekeeper_ipv6_acl_max;
 	/* This struct has hidden fields. */
 };
 
 struct net_config {
-	int back_iface_enabled;
+	int     back_iface_enabled;
+	uint8_t num_attempts_link_get;
 	/* This struct has hidden fields. */
 };
 
