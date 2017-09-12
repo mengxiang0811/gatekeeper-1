@@ -43,6 +43,41 @@ enum {
 	NUM_INPUTS_IPV6,
 };
 
+struct acl_search *
+alloc_acl_search(uint8_t num_pkts)
+{
+	struct acl_search *acl = rte_calloc(
+		"acl", 1, sizeof(struct acl_search), 0);
+	if (acl == NULL)
+		return NULL;
+
+	acl->data = rte_calloc("acl_data", num_pkts, sizeof(uint8_t *), 0);
+	if (acl->data == NULL)
+		goto free_acl;
+
+	acl->mbufs = rte_calloc("acl_mbufs",
+		num_pkts, sizeof(struct rte_mbuf *), 0);
+	if (acl->mbufs == NULL)
+		goto free_acl_data;
+
+	acl->res = rte_calloc("acl_res", num_pkts, sizeof(uint32_t), 0);
+	if (acl->res == NULL)
+		goto free_acl_mbufs;
+
+	return acl;
+
+free_acl_mbufs:
+	rte_free(acl->mbufs);
+
+free_acl_data:
+	rte_free(acl->data);
+
+free_acl:
+	rte_free(acl);
+
+	return NULL;
+}
+
 /* Callback function for when there's no classification match. */
 static int
 drop_unmatched_ipv6_pkts(struct rte_mbuf **pkts, unsigned int num_pkts,
@@ -195,7 +230,9 @@ int
 process_ipv6_acl(struct gatekeeper_if *iface, unsigned int lcore_id,
 	struct acl_search *acl)
 {
-	struct rte_mbuf *pkts[iface->acl_func_count][GATEKEEPER_MAX_PKT_BURST];
+	uint16_t gatekeeper_max_pkt_burst =
+		get_gatekeeper_conf()->gatekeeper_max_pkt_burst;
+	struct rte_mbuf *pkts[iface->acl_func_count][gatekeeper_max_pkt_burst];
 	int num_pkts[iface->acl_func_count];
 	unsigned int socket_id = rte_lcore_to_socket_id(lcore_id);
 	unsigned int i;

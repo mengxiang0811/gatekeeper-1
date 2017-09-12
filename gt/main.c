@@ -502,6 +502,11 @@ gt_proc(void *arg)
 	uint16_t rx_queue = instance->rx_queue;
 	uint16_t tx_queue = instance->tx_queue;
 
+	uint16_t gatekeeper_max_pkt_burst =
+		get_gatekeeper_conf()->gatekeeper_max_pkt_burst;
+
+	struct acl_search *acl = instance->acl;
+
 	RTE_LOG(NOTICE, GATEKEEPER,
 		"gt: the GT block is running at lcore = %u\n", lcore);
 
@@ -512,13 +517,12 @@ gt_proc(void *arg)
 		uint16_t num_rx;
 		uint16_t num_tx = 0;
 		uint16_t num_tx_succ;
-		struct rte_mbuf *rx_bufs[GATEKEEPER_MAX_PKT_BURST];
-		struct rte_mbuf *tx_bufs[GATEKEEPER_MAX_PKT_BURST];
-		IPV6_ACL_SEARCH_DEF(acl);
+		struct rte_mbuf *rx_bufs[gatekeeper_max_pkt_burst];
+		struct rte_mbuf *tx_bufs[gatekeeper_max_pkt_burst];
 
 		/* Load a set of packets from the front NIC. */
 		num_rx = rte_eth_rx_burst(port, rx_queue, rx_bufs,
-			GATEKEEPER_MAX_PKT_BURST);
+			gatekeeper_max_pkt_burst);
 
 		if (unlikely(num_rx == 0))
 			continue;
@@ -540,7 +544,7 @@ gt_proc(void *arg)
 			ret = gt_parse_incoming_pkt(m, &pkt_info);
 			if (ret < 0) {
 				if (pkt_info.outer_ip_ver == ETHER_TYPE_IPv6) {
-					add_pkt_ipv6_acl(&acl, m);
+					add_pkt_ipv6_acl(acl, m);
 					continue;
 				}
 
@@ -613,7 +617,7 @@ gt_proc(void *arg)
 				rte_pktmbuf_free(tx_bufs[i]);
 		}
 
-		process_pkts_ipv6_acl(&gt_conf->net->front, lcore, &acl);
+		process_pkts_ipv6_acl(&gt_conf->net->front, lcore, acl);
 	}
 
 	RTE_LOG(NOTICE, GATEKEEPER,
@@ -633,6 +637,9 @@ cleanup_gt_instance(struct gt_instance *instance)
 {
 	lua_close(instance->lua_state);
 	instance->lua_state = NULL;
+
+	destroy_acl_search(instance->acl);
+	instance->acl = NULL;
 }
 
 static int
@@ -702,6 +709,17 @@ config_gt_instance(struct gt_config *gt_conf, unsigned int lcore_id)
 		goto free_lua_state;
 	}
 
+	instance->acl = alloc_acl_search(
+		get_gatekeeper_conf()->gatekeeper_max_pkt_burst);
+	if (instance->acl == NULL) {
+		RTE_LOG(ERR, MALLOC,
+			"The GT block can't create acl search at lcore %u!\n",
+			lcore_id);
+
+		ret = -1;
+		goto free_lua_state;
+	}
+
 	goto out;
 
 free_lua_state:
@@ -728,7 +746,7 @@ init_gt_instances(struct gt_config *gt_conf)
 		if (ret < 0) {
 			RTE_LOG(ERR, GATEKEEPER, "gt: cannot assign an RX queue for the front interface for lcore %u\n",
 				lcore);
-			goto free_lua_state;
+			goto free_gt_instances;
 		}
 		inst_ptr->rx_queue = ret;
 
@@ -736,7 +754,7 @@ init_gt_instances(struct gt_config *gt_conf)
 		if (ret < 0) {
 			RTE_LOG(ERR, GATEKEEPER, "gt: cannot assign a TX queue for the front interface for lcore %u\n",
 				lcore);
-			goto free_lua_state;
+			goto free_gt_instances;
 		}
 		inst_ptr->tx_queue = ret;
 
@@ -746,7 +764,7 @@ init_gt_instances(struct gt_config *gt_conf)
 		 */
 		ret = config_gt_instance(gt_conf, lcore);
 		if (ret < 0)
-			goto free_lua_state;
+			goto free_gt_instances;
 
 		num_succ_instances++;
 	}
@@ -754,7 +772,7 @@ init_gt_instances(struct gt_config *gt_conf)
 	ret = 0;
 	goto out;
 
-free_lua_state:
+free_gt_instances:
 	for (i = 0; i < num_succ_instances; i++)
 		cleanup_gt_instance(&gt_conf->instances[i]);
 out:

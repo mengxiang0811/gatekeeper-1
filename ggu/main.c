@@ -328,6 +328,8 @@ ggu_proc(void *arg)
 	struct ggu_config *ggu_conf = (struct ggu_config *)arg;
 	uint8_t port_in = ggu_conf->net->back.id;
 	uint16_t rx_queue = ggu_conf->rx_queue_back;
+	uint16_t gatekeeper_max_pkt_burst =
+		get_gatekeeper_conf()->gatekeeper_max_pkt_burst;
 
 	RTE_LOG(NOTICE, GATEKEEPER,
 		"ggu: the GK-GT unit is running at lcore = %u\n", lcore);
@@ -335,11 +337,11 @@ ggu_proc(void *arg)
 	while (likely(!exiting)) {
 		uint16_t i;
 		uint16_t num_rx;
-		struct rte_mbuf *bufs[GATEKEEPER_MAX_PKT_BURST];
+		struct rte_mbuf *bufs[gatekeeper_max_pkt_burst];
 
 		/* Load a set of GK-GT packets from the back NIC. */
 		num_rx = rte_eth_rx_burst(port_in, rx_queue, bufs,
-			GATEKEEPER_MAX_PKT_BURST);
+			gatekeeper_max_pkt_burst);
 		if (unlikely(num_rx == 0))
 			continue;
 

@@ -48,7 +48,8 @@
  */
 static const uint16_t MSG_MAX_LEN = (uint16_t)~0U;
 
-static struct dynamic_config config;
+static struct gatekeeper_config gatekeeper_conf;
+static struct dynamic_config dy_conf;
 
 /*
  * Return values:
@@ -449,10 +450,16 @@ dyn_cfg_proc(void *arg)
 	return ret;
 }
 
+struct gatekeeper_config *
+get_gatekeeper_conf(void)
+{
+	return &gatekeeper_conf;
+}
+
 struct dynamic_config *
 get_dy_conf(void)
 {
-	return &config;
+	return &dy_conf;
 }
 
 void

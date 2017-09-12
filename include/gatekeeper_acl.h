@@ -40,14 +40,16 @@ RTE_ACL_RULE_DEF(ipv6_acl_rule, RTE_DIM(ipv6_defs));
 
 struct acl_search {
 	/* References to the start of the IPv6 header in each packet. */
-	const uint8_t   *data[GATEKEEPER_MAX_PKT_BURST];
+	const uint8_t   **data;
 	/* References to each packet's mbuf. */
-	struct rte_mbuf *mbufs[GATEKEEPER_MAX_PKT_BURST];
+	struct rte_mbuf **mbufs;
 	/* The classification results for each packet. */
-	uint32_t        res[GATEKEEPER_MAX_PKT_BURST];
+	uint32_t        *res;
 	/* The number of packets held for classification. */
 	unsigned int    num;
 };
+
+struct acl_search *alloc_acl_search(uint8_t num_pkts);
 
 /* Allocate and free IPv6 ACLs. */
 int init_ipv6_acls(struct gatekeeper_if *iface);
@@ -64,9 +66,14 @@ int build_ipv6_acls(struct gatekeeper_if *iface);
 int process_ipv6_acl(struct gatekeeper_if *iface, unsigned int lcore_id,
 	struct acl_search *acl);
 
-/* Definitions for blocks making use of the IPv6 ACLs. */
-
-#define IPV6_ACL_SEARCH_DEF(name) struct acl_search name = { .num = 0, }
+static inline void
+destroy_acl_search(struct acl_search *acl)
+{
+	rte_free(acl->res);
+	rte_free(acl->mbufs);
+	rte_free(acl->data);
+	rte_free(acl);
+}
 
 /* This function expects that the mbuf includes the Ethernet header. */
 static inline void
