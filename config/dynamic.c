@@ -35,10 +35,6 @@
 #include "gatekeeper_config.h"
 #include "gatekeeper_launch.h"
 
-/* TODO Get the install path from the configuration file. */
-#define LUA_DY_BASE_DIR     "./lua"
-#define DYNAMIC_CONFIG_FILE "dylib.lua"
-
 /*
  * The cast "(uint16_t)" is needed because of
  * the strict compilation check of DPDK,

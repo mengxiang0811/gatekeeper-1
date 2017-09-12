@@ -167,6 +167,12 @@ struct cps_config {
 
 struct gatekeeper_config {
 	uint16_t gatekeeper_max_pkt_burst;
+	uint8_t  gatekeeper_max_ports;
+	uint16_t gatekeeper_max_queues;
+	uint16_t gatekeeper_num_rx_desc;
+	uint16_t gatekeeper_num_tx_desc;
+	unsigned gatekeeper_mbuf_size;
+	unsigned gatekeeper_cache_size;
 };
 
 struct dynamic_config {
