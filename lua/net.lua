@@ -34,6 +34,7 @@ return function (gatekeeper_server)
 	front_iface.nd_cache_timeout_sec = front_nd_cache_timeout_sec
 	front_iface.bonding_mode = front_bonding_mode
 	front_iface.gatekeeper_ipv6_acl_max = 8
+	front_iface.max_num_ipv6_acl_rules = 32
 	local ret = gatekeeper.init_iface(front_iface, "front",
 		front_ports, front_ips)
 
@@ -44,6 +45,7 @@ return function (gatekeeper_server)
 		back_iface.nd_cache_timeout_sec = back_nd_cache_timeout_sec
 		back_iface.bonding_mode = back_bonding_mode
 		back_iface.gatekeeper_ipv6_acl_max = 8
+		back_iface.max_num_ipv6_acl_rules = 32
 		ret = gatekeeper.init_iface(back_iface, "back",
 			back_ports, back_ips)
 	end

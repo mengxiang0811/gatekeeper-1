@@ -19,9 +19,6 @@
 #include "gatekeeper_acl.h"
 #include "gatekeeper_lls.h"
 
-/* Maximum number of rules installed per ACL. */
-#define MAX_NUM_IPV6_ACL_RULES (32)
-
 /*
  * Input indices for the IPv6-related ACL fields. Fields are given
  * unique identifiers, but since the DPDK ACL library processes
@@ -352,7 +349,7 @@ init_ipv6_acls(struct gatekeeper_if *iface)
 		struct rte_acl_param acl_params = {
 			.socket_id = i,
 			.rule_size = RTE_ACL_RULE_SZ(RTE_DIM(ipv6_defs)),
-			.max_rule_num = MAX_NUM_IPV6_ACL_RULES,
+			.max_rule_num = iface->max_num_ipv6_acl_rules,
 		};
 		int ret = snprintf(acl_name, sizeof(acl_name),
 			"%s_%u", iface->name, i);

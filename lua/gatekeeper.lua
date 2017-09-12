@@ -120,6 +120,7 @@ struct gatekeeper_if {
 	uint32_t nd_cache_timeout_sec;
 	uint32_t bonding_mode;
 	uint8_t  gatekeeper_ipv6_acl_max;
+	uint8_t  max_num_ipv6_acl_rules;
 	/* This struct has hidden fields. */
 };
 

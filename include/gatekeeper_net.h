@@ -105,6 +105,9 @@ struct gatekeeper_if {
 	/* Maximum number of ACL classification types. */
 	uint8_t         gatekeeper_ipv6_acl_max;
 
+	/* Maximum number of rules installed per ACL. */
+	uint8_t         max_num_ipv6_acl_rules;
+
 	/*
 	 * The fields below are for internal use.
 	 * Configuration files should not refer to them.
