@@ -15,6 +15,9 @@ return function (net_conf, lcore)
 	sol_conf.enq_burst_size = 32
 	sol_conf.deq_burst_size = 32
 
+	-- XXX Sample parameter, need to be tested for better performance.
+	sol_conf.mailbox_mem_cache_size = 64
+
 	-- Setup the sol functional block.
 	local ret = gatekeeper.c.run_sol(net_conf, sol_conf)
 	if ret < 0 then

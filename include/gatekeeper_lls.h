@@ -185,6 +185,9 @@ struct lls_config {
 	 */
 	int               debug;
 
+	unsigned          mailbox_max_entries;
+	unsigned          mailbox_mem_cache_size;
+
 	/*
 	 * The fields below are for internal use.
 	 * Configuration files should not refer to them.

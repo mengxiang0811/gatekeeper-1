@@ -45,6 +45,9 @@ struct cps_config {
 
 	uint16_t          cps_req_burst_size;
 
+	unsigned          mailbox_max_entries;
+	unsigned          mailbox_mem_cache_size;
+
 	/*
 	 * Period between scans of the outstanding
 	 * resolution requests from KNIs.

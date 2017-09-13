@@ -874,9 +874,9 @@ run_cps(struct net_config *net_conf, struct cps_config *cps_conf,
 		goto stage3;
 	}
 
-	ret = init_mailbox("cps_mb", MAILBOX_MAX_ENTRIES,
-		sizeof(struct cps_request), cps_conf->lcore_id,
-		&cps_conf->mailbox);
+	ret = init_mailbox("cps_mb", cps_conf->mailbox_max_entries,
+		sizeof(struct cps_request), cps_conf->mailbox_mem_cache_size,
+		cps_conf->lcore_id, &cps_conf->mailbox);
 	if (ret < 0)
 		goto kni;
 

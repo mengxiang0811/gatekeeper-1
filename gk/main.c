@@ -517,8 +517,9 @@ setup_gk_instance(unsigned int lcore_id, struct gk_config *gk_conf)
 		goto flow_entry;
 	}
 
-	ret = init_mailbox("gk", MAILBOX_MAX_ENTRIES,
-		sizeof(struct gk_cmd_entry), lcore_id, &instance->mb);
+	ret = init_mailbox("gk", gk_conf->mailbox_max_entries,
+		sizeof(struct gk_cmd_entry), gk_conf->mailbox_mem_cache_size,
+		lcore_id, &instance->mb);
     	if (ret < 0)
         	goto acl_search;
 

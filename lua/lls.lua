@@ -9,6 +9,10 @@ return function (net_conf, numa_table)
 	-- Change these parameters to configure the LLS block.
 	lls_conf.debug = false
 
+	-- XXX Sample parameters, need to be tested for better performance.
+	lls_conf.mailbox_max_entries = 128
+	lls_conf.mailbox_mem_cache_size = 64
+
 	-- Setup the LLS functional block.
 	lls_conf.lcore_id = gatekeeper.alloc_an_lcore(numa_table)
 	local ret = gatekeeper.c.run_lls(net_conf, lls_conf)

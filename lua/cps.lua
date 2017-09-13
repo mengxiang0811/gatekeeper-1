@@ -22,6 +22,8 @@ return function (net_conf, lls_conf, numa_table)
 	-- XXX Sample parameters, need to be tested for better performance.
 	cps_conf.cps_req_burst_size = 32
 	cps_conf.cps_scan_interval_sec = 5
+	cps_conf.mailbox_max_entries = 128
+	cps_conf.mailbox_mem_cache_size = 64
 
 	local ret = gatekeeper.c.run_cps(net_conf, cps_conf, lls_conf,
 		kni_kmod_path)

@@ -22,6 +22,8 @@ return function (net_conf, sol_conf, gk_lcores)
 
 	-- XXX Sample parameters, need to be tested for better performance.
 	gk_conf.gk_cmd_burst_size = 32
+	gk_conf.mailbox_max_entries = 128
+	gk_conf.mailbox_mem_cache_size = 64
 
 	--
 	-- Code below this point should not need to be changed.
