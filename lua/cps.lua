@@ -16,6 +16,12 @@ return function (net_conf, lls_conf, numa_table)
 	cps_conf.lcore_id = gatekeeper.alloc_an_lcore(numa_table)
 	cps_conf.tcp_port_bgp = tcp_port_bgp
 	cps_conf.debug = false
+	cps_conf.num_attempts_kni_link_set = 5
+	cps_conf.max_cps_route_updates = 8
+
+	-- XXX Sample parameters, need to be tested for better performance.
+	cps_conf.cps_req_burst_size = 32
+	cps_conf.cps_scan_interval_sec = 5
 
 	local ret = gatekeeper.c.run_cps(net_conf, cps_conf, lls_conf,
 		kni_kmod_path)

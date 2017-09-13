@@ -34,12 +34,6 @@
 #include "gatekeeper_main.h"
 #include "kni.h"
 
-/* Number of times to attempt bring a KNI interface up or down. */
-#define NUM_ATTEMPTS_KNI_LINK_SET (5)
-
-/* Maximum number of updates for LPM table to serve at once. */
-#define MAX_CPS_ROUTE_UPDATES (8)
-
 /*
  * According to init_module(2) and delete_module(2), there
  * are no declarations for these functions in header files.
@@ -247,7 +241,7 @@ modify_link(struct mnl_socket *nl, struct rte_kni *kni,
 next:
 			attempts++;
 			sleep(1);
-		} while (attempts < NUM_ATTEMPTS_KNI_LINK_SET);
+		} while (attempts < get_cps_conf()->num_attempts_kni_link_set);
 	}
 kill:
 	/* Failed to wait for child or waited for too many attempts. */
@@ -616,7 +610,9 @@ mnl_socket_recvfrom_flags(const struct mnl_socket *nl, void *buf, size_t bufsiz,
 void
 kni_cps_route_event(struct cps_config *cps_conf)
 {
-	struct route_update updates[MAX_CPS_ROUTE_UPDATES];
+	uint16_t max_cps_route_updates =
+		get_cps_conf()->max_cps_route_updates;
+	struct route_update updates[max_cps_route_updates];
 	unsigned int num_updates = 0;
 	char buf[MNL_SOCKET_BUFFER_SIZE];
 
@@ -638,7 +634,7 @@ kni_cps_route_event(struct cps_config *cps_conf)
 
 		if (updates[num_updates].valid)
 			num_updates++;
-	} while (num_updates < MAX_CPS_ROUTE_UPDATES);
+	} while (num_updates < max_cps_route_updates);
 
 	/* TODO Send updates to GK block to update LPM table. */
 }
@@ -743,20 +739,18 @@ init_kni(const char *kni_kmod_path, unsigned int num_kni)
 	return 0;
 }
 
-#define PROC_MODULES_FILENAME ("/proc/modules")
-
 static int
-check_usage(const char *modname)
+check_usage(const char *modname, const char *proc_modules_filename)
 {
 	FILE *module_list;
 	int found_mods = false;
 	char line[10240], name[64];
 	int ret = 0;
 
-	module_list = fopen(PROC_MODULES_FILENAME, "r");
+	module_list = fopen(proc_modules_filename, "r");
 	if (module_list == NULL) {
 		RTE_LOG(ERR, GATEKEEPER,
-			"Can't open %s: %s\n", PROC_MODULES_FILENAME,
+			"Can't open %s: %s\n", proc_modules_filename,
 			strerror(errno));
 		return -1;
 	}
@@ -783,7 +777,7 @@ check_usage(const char *modname)
 			if (scanned < 2 || scanned == EOF)
 				RTE_LOG(ERR, GATEKEEPER,
 					"Unknown format in %s: %s\n",
-					PROC_MODULES_FILENAME, line);
+					proc_modules_filename, line);
 			else
 				RTE_LOG(ERR, GATEKEEPER,
 					"Kernel doesn't support unloading.\n");
@@ -806,10 +800,10 @@ check_usage(const char *modname)
 	if (found_mods)
 		RTE_LOG(ERR, GATEKEEPER,
 			"Module %s does not exist in %s\n", modname,
-			PROC_MODULES_FILENAME);
+			proc_modules_filename);
 	else
 		RTE_LOG(ERR, GATEKEEPER,
-			"fgets: error in reading %s\n", PROC_MODULES_FILENAME);
+			"fgets: error in reading %s\n", proc_modules_filename);
 
 	ret = -1;
 out:
@@ -821,11 +815,13 @@ void
 rm_kni(void)
 {
 	const char *name = "rte_kni";
+	const char *proc_modules_filename = "/proc/modules";
+
 	int ret;
 
 	rte_kni_close();
 
-	ret = check_usage(name);
+	ret = check_usage(name, proc_modules_filename);
 	if (ret < 0)
 		return;
 

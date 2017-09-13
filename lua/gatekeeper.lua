@@ -165,6 +165,10 @@ struct cps_config {
 	unsigned int lcore_id;
 	uint16_t     tcp_port_bgp;
 	int          debug;
+	uint8_t      num_attempts_kni_link_set;
+	uint16_t     max_cps_route_updates;
+	uint16_t     cps_req_burst_size;
+	uint16_t     cps_scan_interval_sec;
 	/* This struct has hidden fields. */
 };
 
