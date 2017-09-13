@@ -20,6 +20,9 @@ return function (net_conf, sol_conf, gk_lcores)
 	gk_conf.gk_max_num_ipv4_fib_entries = 256
 	gk_conf.gk_max_num_ipv6_fib_entries = 65536
 
+	-- XXX Sample parameters, need to be tested for better performance.
+	gk_conf.gk_cmd_burst_size = 32
+
 	--
 	-- Code below this point should not need to be changed.
 	--

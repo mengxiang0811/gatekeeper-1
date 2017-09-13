@@ -49,9 +49,6 @@
 #define PRIORITY_RENEW_CAP	 (2)
 #define PRIORITY_MAX		 (63)
 
-/* XXX Sample parameters, need to be tested for better performance. */
-#define GK_CMD_BURST_SIZE        (32)
-
 /* Store information about a packet. */
 struct ipacket {
 	/* Flow identifier for this packet. */
@@ -1177,11 +1174,11 @@ process_cmds_from_mailbox(
 {
 	int i;
 	int num_cmd;
-	struct gk_cmd_entry *gk_cmds[GK_CMD_BURST_SIZE];
+	struct gk_cmd_entry *gk_cmds[gk_conf->gk_cmd_burst_size];
 
 	/* Load a set of commands from its mailbox ring. */
         num_cmd = mb_dequeue_burst(&instance->mb,
-               	(void **)gk_cmds, GK_CMD_BURST_SIZE);
+               	(void **)gk_cmds, gk_conf->gk_cmd_burst_size);
 
         for (i = 0; i < num_cmd; i++) {
 		process_gk_cmd(gk_cmds[i], instance, &gk_conf->lpm_tbl);
