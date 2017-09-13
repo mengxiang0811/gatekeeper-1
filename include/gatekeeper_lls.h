@@ -34,9 +34,6 @@
  */
 #define LLS_MAX_KEY_LEN (16)
 
-/* Number of records that a LLS cache can hold. */
-#define LLS_CACHE_RECORDS (1024)
-
 /* Requests that can be made to the LLS block. */
 enum lls_req_ty {
 	/* Express interest in a map by registering a callback function. */
@@ -141,7 +138,7 @@ struct lls_cache {
 	const char        *name;
 
 	/* Array of cache records indexed using @hash. */
-	struct lls_record records[LLS_CACHE_RECORDS];
+	struct lls_record *records;
 
 	/* Hash instance that maps IP address keys to LLS cache records. */
 	struct rte_hash   *hash;
@@ -187,6 +184,31 @@ struct lls_config {
 
 	unsigned          mailbox_max_entries;
 	unsigned          mailbox_mem_cache_size;
+
+	/* Number of records that a LLS cache can hold. */
+	unsigned          lls_cache_records;
+
+	/* Length of time (in seconds) to wait between scans of the cache. */
+	unsigned          lls_cache_scan_interval_sec;
+
+	uint16_t          lls_cache_burst_size;
+
+	/*
+	 * When using LACP, there are two requirements:
+	 *
+	 *  - For LACP to work best, RX burst size should be at least twice
+	 *    the number of slaves. This is so that the interface can receive
+	 *    any needed LACP messages flowing without the application's
+	 *    knowledge. This is enforced with the definition of
+	 *    gatekeeper_max_pkt_burst in gatekeeper_config.
+	 *
+	 *  - RX/TX burst functions must be invoked at least once every 100ms.
+	 *    To do so, the RX burst function is called with every iteration
+	 *    of the loop in lls_proc(), and lls_lacp_announce() fulfills the
+	 *    TX burst requirement on a timer that runs slightly more frequently
+	 *    than every 100ms, defined below.
+	 */
+	unsigned          lls_lacp_announce_interva_ms;
 
 	/*
 	 * The fields below are for internal use.

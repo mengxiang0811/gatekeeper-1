@@ -12,6 +12,11 @@ return function (net_conf, numa_table)
 	-- XXX Sample parameters, need to be tested for better performance.
 	lls_conf.mailbox_max_entries = 128
 	lls_conf.mailbox_mem_cache_size = 64
+	lls_conf.lls_cache_records = 1024
+	lls_conf.lls_cache_burst_size = 32
+
+	lls_conf.lls_cache_scan_interval_sec = 10
+	lls_conf.lls_lacp_announce_interva_ms = 99
 
 	-- Setup the LLS functional block.
 	lls_conf.lcore_id = gatekeeper.alloc_an_lcore(numa_table)

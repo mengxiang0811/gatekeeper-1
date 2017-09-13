@@ -157,6 +157,10 @@ struct lls_config {
 	int          debug;
 	unsigned     mailbox_max_entries;
 	unsigned     mailbox_mem_cache_size;
+	unsigned     lls_cache_records;
+	unsigned     lls_cache_scan_interval_sec;
+	unsigned     lls_lacp_announce_interva_ms;
+	uint16_t     lls_cache_burst_size;
 	/* This struct has hidden fields. */
 };
 

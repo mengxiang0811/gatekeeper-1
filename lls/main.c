@@ -29,26 +29,6 @@
 #include "cache.h"
 #include "nd.h"
 
-/* Length of time (in seconds) to wait between scans of the cache. */
-#define LLS_CACHE_SCAN_INTERVAL_SEC 10
-
-/*
- * When using LACP, there are two requirements:
- *
- *  - For LACP to work best, RX burst size should be at least twice
- *    the number of slaves. This is so that the interface can receive
- *    any needed LACP messages flowing without the application's
- *    knowledge. This is enforced with the definition of
- *    gatekeeper_max_pkt_burst in gatekeeper_config.
- *
- *  - RX/TX burst functions must be invoked at least once every 100ms.
- *    To do so, the RX burst function is called with every iteration
- *    of the loop in lls_proc(), and lls_lacp_announce() fulfills the
- *    TX burst requirement on a timer that runs slightly more frequently
- *    than every 100ms, defined below.
- */
-#define LLS_LACP_ANNOUNCE_INTERVAL_MS 99
-
 /*
  * TODO Don't alert user of LLS transmission failures while LACP
  * is still configuring, and warn the user if LACP is taking an
@@ -305,7 +285,7 @@ static inline int
 lacp_timer_reset(struct lls_config *lls_conf, struct gatekeeper_if *iface)
 {
 	return rte_timer_reset(&iface->lacp_timer,
-		(uint64_t)((LLS_LACP_ANNOUNCE_INTERVAL_MS / 1000.0) *
+		(uint64_t)((lls_conf->lls_lacp_announce_interva_ms / 1000.0) *
 			rte_get_timer_hz()), PERIODICAL,
 		lls_conf->lcore_id, lls_lacp_announce, iface);
 }
@@ -606,11 +586,14 @@ run_lls(struct net_config *net_conf, struct lls_config *lls_conf)
 	if (ret < 0)
 		goto stage2;
 
-	/* Do LLS cache scan every LLS_CACHE_SCAN_INTERVAL_SEC seconds. */
+	/*
+	 * Do LLS cache scan every @lls_conf->lls_cache_scan_interval_sec
+	 * seconds.
+	 */
 	rte_timer_init(&lls_conf->scan_timer);
 	ret = rte_timer_reset(&lls_conf->scan_timer,
-		LLS_CACHE_SCAN_INTERVAL_SEC * rte_get_timer_hz(), PERIODICAL,
-		lls_conf->lcore_id, lls_scan, lls_conf);
+		lls_conf->lls_cache_scan_interval_sec * rte_get_timer_hz(),
+		PERIODICAL, lls_conf->lcore_id, lls_scan, lls_conf);
 	if (ret < 0) {
 		RTE_LOG(ERR, TIMER, "Cannot set LLS scan timer\n");
 		goto stage3;
