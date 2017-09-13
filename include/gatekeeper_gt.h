@@ -65,6 +65,10 @@ struct gt_config {
 	 * The fields below are for internal use.
 	 * Configuration files should not refer to them.
 	 */
+	char               *lua_policy_base_dir;
+
+	char               *grantor_config_file;
+
 	rte_atomic32_t	   ref_cnt;
 
 	/* The lcore ids at which each instance runs. */
@@ -82,7 +86,8 @@ struct gt_config {
 
 struct gt_config *alloc_gt_conf(void);
 int gt_conf_put(struct gt_config *gt_conf);
-int run_gt(struct net_config *net_conf, struct gt_config *gt_conf);
+int run_gt(const char *policy_dir_name, const char *gt_config_file_name,
+	struct net_config *net_conf, struct gt_config *gt_conf);
 
 static inline void
 gt_conf_hold(struct gt_config *gt_conf)

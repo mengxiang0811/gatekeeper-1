@@ -228,7 +228,8 @@ struct lls_config *get_lls_conf(void);
 int run_lls(struct net_config *net_conf, struct lls_config *lls_conf);
 
 struct gt_config *alloc_gt_conf(void);
-int run_gt(struct net_config *net_conf, struct gt_config *gt_conf);
+int run_gt(const char *policy_dir_name, const char *gt_config_file_name,
+	struct net_config *net_conf, struct gt_config *gt_conf);
 
 struct cps_config *get_cps_conf(void);
 int run_cps(struct net_config *net_conf, struct cps_config *cps_conf,

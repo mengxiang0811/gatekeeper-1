@@ -17,7 +17,10 @@ return function (net_conf, numa_table)
 	gatekeeper.gt_assign_lcores(gt_conf, gt_lcores)
 
 	-- Setup the GT functional block.
-	local ret = gatekeeper.c.run_gt(net_conf, gt_conf)
+	local policy_dir_name = "./lua"
+	local gt_config_file_name = "policy.lua"
+	local ret = gatekeeper.c.run_gt(
+		policy_dir_name, gt_config_file_name, net_conf, gt_conf)
 	if ret < 0 then
 		error("Failed to run gt block(s)")
 	end
