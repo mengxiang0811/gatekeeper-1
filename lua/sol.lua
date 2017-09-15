@@ -18,6 +18,8 @@ return function (net_conf, lcore)
 	-- XXX Sample parameter, need to be tested for better performance.
 	sol_conf.mailbox_mem_cache_size = 64
 
+	sol_conf.tb_rate_config_err = 1e-7
+
 	-- Setup the sol functional block.
 	local ret = gatekeeper.c.run_sol(net_conf, sol_conf)
 	if ret < 0 then

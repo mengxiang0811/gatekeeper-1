@@ -111,6 +111,9 @@ struct sol_config {
 
 	unsigned           mailbox_mem_cache_size;
 
+	/* Token bucket rate approximation error. */
+	double             tb_rate_config_err;
+
 	/*
 	 * The fields below are for internal use.
 	 * Configuration files should not refer to them.
