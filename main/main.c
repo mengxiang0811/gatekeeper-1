@@ -33,6 +33,7 @@
 #include "gatekeeper_config.h"
 #include "gatekeeper_net.h"
 #include "gatekeeper_launch.h"
+#include "gatekeeper_ratelimit.h"
 
 /* Indicates whether the program needs to exit or not. */
 volatile int exiting = false;
@@ -145,6 +146,8 @@ main(int argc, char **argv)
 	int ret = rte_eal_init(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Error with EAL initialization!\n");
+
+	log_ratelimit_init();
 
 	/* XXX Set the global log level. Change it as needed. */
 	rte_log_set_global_level(RTE_LOG_DEBUG);
