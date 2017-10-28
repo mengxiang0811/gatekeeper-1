@@ -1264,16 +1264,6 @@ check_gateway_prefix(struct ip_prefix *prefix, struct ipaddr *gw_addr)
 /*
  * This function makes sure that only a drop or another grantor entry
  * must be able to be longer than a grantor or a drop prefix.
- *
- * TODO A potential bug needs to be fixed here.
- * Assuming there's prefix 10.1.1.0/24 that leads to a gateway and
- * the prefix being added to a grantor is 10.1/16.
- * That is, the gateway entry would be a security hole.
- *
- * The solution is to extend RTE LPM table to have an iterator over
- * its entries. The iterator should require a prefix as parameter and
- * list all entries as long as a given prefix or longer.
- * To list all entries, the prefix would have length zero.
  */
 static int
 check_prefix_locked(struct ip_prefix *prefix,
@@ -1284,8 +1274,41 @@ check_prefix_locked(struct ip_prefix *prefix,
 	struct gk_fib *ip_prefix_fib;
 	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
 
-	if (action == GK_DROP || action == GK_FWD_GRANTOR)
+	if (action == GK_DROP || action == GK_FWD_GRANTOR) {
+		int num_rules;
+
+		if (prefix->addr.proto == ETHER_TYPE_IPv4) {
+			struct rte_lpm_rule_entry re_tbl[
+				gk_conf->max_num_ipv4_rules];
+			num_rules = rte_lpm_rule_iterator(
+				ltbl->lpm, ntohl(prefix->addr.ip.v4.s_addr),
+				prefix->len, re_tbl);
+			for (i = 0; i < num_rules; i++) {
+				struct rte_lpm_rule_entry *re = &re_tbl[i];
+				ip_prefix_fib = &ltbl->fib_tbl[re->next_hop];
+				if (ip_prefix_fib->action != GK_FWD_GRANTOR &&
+						ip_prefix_fib->action !=
+						GK_DROP)
+					return -1;
+			}
+		} else {
+			struct rte_lpm6_rule re_tbl6[
+				gk_conf->max_num_ipv6_rules];
+			num_rules = rte_lpm6_rule_iterator(
+				ltbl->lpm6, prefix->addr.ip.v6.s6_addr,
+				prefix->len, re_tbl6);
+			for (i = 0; i < num_rules; i++) {
+				struct rte_lpm6_rule *re = &re_tbl6[i];
+				ip_prefix_fib = &ltbl->fib_tbl6[re->next_hop];
+				if (ip_prefix_fib->action != GK_FWD_GRANTOR &&
+						ip_prefix_fib->action !=
+						GK_DROP)
+					return -1;
+			}
+		}
+
 		return 0;
+	}
 
 	if (prefix->addr.proto == ETHER_TYPE_IPv4) {
 		for (i = 0; i < prefix->len; i++) {
