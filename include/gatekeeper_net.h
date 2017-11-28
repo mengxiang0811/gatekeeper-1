@@ -257,6 +257,9 @@ struct net_config {
 	 */
 	int                  back_iface_enabled;
 
+	/* The parameter that alters the behavior of the call getrandom(). */
+	unsigned int         random_flags;
+
 	/*
 	 * The fields below are for internal use.
 	 * Configuration files should not refer to them.

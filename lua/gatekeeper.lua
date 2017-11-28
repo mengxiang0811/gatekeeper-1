@@ -99,6 +99,12 @@ local ffi = require("ffi")
 -- Structs
 ffi.cdef[[
 
+enum getrandom_flags {
+	/* Corresponding to the values in /usr/include/linux/random.h. */
+	GRND_NONBLOCK = 1,
+	GRND_RANDOM = 2,
+};
+
 enum bonding_modes {
 	/* Corresponding to the values in rte_eth_bond.h. */
 	BONDING_MODE_ROUND_ROBIN = 0,
@@ -123,7 +129,8 @@ struct gatekeeper_if {
 };
 
 struct net_config {
-	int back_iface_enabled;
+	int          back_iface_enabled;
+	unsigned int random_flags;
 	/* This struct has hidden fields. */
 };
 

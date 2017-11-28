@@ -21,6 +21,8 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <syscall.h>
+#include <linux/random.h>
 
 #include <rte_mbuf.h>
 #include <rte_thash.h>
@@ -43,16 +45,10 @@
 static struct net_config config;
 
 /*
- * XXX The secret key of the RSS hash must be random
- * in order to avoid hackers to know it.
+ * The secret key of the RSS hash (RSK) must be random
+ * in order to prevent hackers from knowing it.
  */
-uint8_t default_rss_key[GATEKEEPER_RSS_KEY_LEN] = {
-	0x6d, 0x5a, 0x56, 0xda, 0x25, 0x5b, 0x0e, 0xc2,
-	0x41, 0x67, 0x25, 0x3d, 0x43, 0xa3, 0x8f, 0xb0,
-	0xd0, 0xca, 0x2b, 0xcb, 0xae, 0x7b, 0x30, 0xb4,
-	0x77, 0xcb, 0x2d, 0xa3, 0x80, 0x30, 0xf2, 0x0c,
-	0x6a, 0x42, 0xb7, 0x3b, 0xbe, 0xac, 0x01, 0xfa,
-};
+uint8_t default_rss_key[GATEKEEPER_RSS_KEY_LEN] = {0, };
 
 /* To support the optimized implementation of generic RSS hash function. */
 uint8_t rss_key_be[RTE_DIM(default_rss_key)];
@@ -1132,6 +1128,7 @@ gatekeeper_init_network(struct net_config *net_conf)
 {
 	int i, num_ports;
 	int ret = -1;
+	int rsk_sum = 0;
 
 	if (net_conf == NULL)
 		return -1;
@@ -1145,6 +1142,21 @@ gatekeeper_init_network(struct net_config *net_conf)
 			RTE_LOG(ERR, MALLOC, "%s: Out of memory\n", __func__);
 			return -1;
 		}
+	}
+
+	/*
+	 * If all bits in RSK are zero, the hash value is zero.
+	 * If all bits in RSK are one, all bits in the hash value
+	 * are either 0 or 1.
+	 */
+	while (rsk_sum == 0 || rsk_sum == 0xFF * sizeof(default_rss_key)) {
+		rsk_sum = 0;
+		while ((ret = syscall(SYS_getrandom, default_rss_key,
+			sizeof(default_rss_key), net_conf->random_flags)) !=
+			sizeof(default_rss_key));
+
+		for (i = 0; (uint32_t)i < sizeof(default_rss_key); i++)
+			rsk_sum += default_rss_key[i];
 	}
 
 	/* Convert RSS key. */
