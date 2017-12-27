@@ -24,6 +24,9 @@
 #include "gatekeeper_lls.h"
 #include "gatekeeper_main.h"
 
+static uint32_t gk_ip4_ht_size_front;
+static uint32_t gk_ip4_ht_size_back;
+
 void
 destroy_neigh_hash_table(struct neighbor_hash_table *neigh)
 {
@@ -365,9 +368,26 @@ lpm_del_route(struct ipaddr *ip_addr, int prefix_len, struct gk_lpm *ltbl)
 	return -1;
 }
 
+static inline uint32_t
+gk_custom_ipv4_hash_func_front(const void *key,
+	__attribute__((unused)) uint32_t length,
+	__attribute__((unused)) uint32_t initval)
+{
+        return *(const uint32_t *)key % gk_ip4_ht_size_front;
+}
+
+static inline uint32_t
+gk_custom_ipv4_hash_func_back(const void *key,
+	__attribute__((unused)) uint32_t length,
+	__attribute__((unused)) uint32_t initval)
+{
+        return *(const uint32_t *)key % gk_ip4_ht_size_back;
+}
+
 int
 setup_neighbor_tbl(unsigned int socket_id, int identifier,
-	int ip_ver, int ht_size, struct neighbor_hash_table *neigh)
+	int ip_ver, int ht_size, struct neighbor_hash_table *neigh,
+	rte_hash_function hash_func)
 {
 	int  i, ret;
 	char ht_name[64];
@@ -377,7 +397,7 @@ setup_neighbor_tbl(unsigned int socket_id, int identifier,
 	struct rte_hash_parameters neigh_hash_params = {
 		.entries = ht_size,
 		.key_len = key_len,
-		.hash_func = DEFAULT_HASH_FUNC,
+		.hash_func = hash_func,
 		.hash_func_init_val = 0,
 	};
 
@@ -456,6 +476,7 @@ setup_net_prefix_fib(int identifier,
 	struct gk_fib *neigh_fib_ipv4 = NULL;
 	struct gk_fib *neigh_fib_ipv6 = NULL;
 	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+	rte_hash_function hash_func = DEFAULT_HASH_FUNC;
 
 	/* Set up the FIB entry for the IPv4 network prefix. */
 	if (ipv4_if_configured(iface)) {
@@ -465,19 +486,23 @@ setup_net_prefix_fib(int identifier,
 
 		neigh_fib_ipv4 = &ltbl->fib_tbl[fib_id];
 
-		ret = setup_neighbor_tbl(socket_id, (identifier * 2),
-			ETHER_TYPE_IPv4, (1 << (32 - iface->ip4_addr_plen)),
-			&neigh_fib_ipv4->u.neigh);
-		if (ret < 0)
-			goto init_fib_ipv4;
-
-		if (iface == &net_conf->front)
+		if (iface == &net_conf->front) {
 			neigh_fib_ipv4->action = GK_FWD_NEIGHBOR_FRONT_NET;
-		else if (likely(iface == &net_conf->back))
+			gk_ip4_ht_size_front = 1 << (32 - iface->ip4_addr_plen);
+			hash_func = gk_custom_ipv4_hash_func_front;
+		} else if (likely(iface == &net_conf->back)) {
 			neigh_fib_ipv4->action = GK_FWD_NEIGHBOR_BACK_NET;
-		else
+			gk_ip4_ht_size_back = 1 << (32 - iface->ip4_addr_plen);
+			hash_func = gk_custom_ipv4_hash_func_back;
+		} else
 			rte_panic("Unexpected condition at %s: invalid interface %s!\n",
 				__func__, iface->name);
+
+		ret = setup_neighbor_tbl(socket_id, (identifier * 2),
+			ETHER_TYPE_IPv4, (1 << (32 - iface->ip4_addr_plen)),
+			&neigh_fib_ipv4->u.neigh, hash_func);
+		if (ret < 0)
+			goto init_fib_ipv4;
 
 		ret = gk_lpm_add_ipv4_route(iface->ip4_addr.s_addr,
 			iface->ip4_addr_plen, fib_id, ltbl);
@@ -495,12 +520,6 @@ setup_net_prefix_fib(int identifier,
 
 		neigh_fib_ipv6 = &ltbl->fib_tbl6[fib_id];
 
-		ret = setup_neighbor_tbl(socket_id, (identifier * 2 + 1),
-			ETHER_TYPE_IPv6, gk_conf->max_num_ipv6_neighbors,
-			&neigh_fib_ipv6->u.neigh6);
-		if (ret < 0)
-			goto init_fib_ipv6;
-
 		if (iface == &net_conf->front)
 			neigh_fib_ipv6->action = GK_FWD_NEIGHBOR_FRONT_NET;
 		else if (likely(iface == &net_conf->back))
@@ -508,6 +527,12 @@ setup_net_prefix_fib(int identifier,
 		else
 			rte_panic("Unexpected condition at %s: invalid interface %s!\n",
 				__func__, iface->name);
+
+		ret = setup_neighbor_tbl(socket_id, (identifier * 2 + 1),
+			ETHER_TYPE_IPv6, gk_conf->max_num_ipv6_neighbors,
+			&neigh_fib_ipv6->u.neigh6, hash_func);
+		if (ret < 0)
+			goto init_fib_ipv6;
 
 		ret = gk_lpm_add_ipv6_route(iface->ip6_addr.s6_addr,
 			iface->ip6_addr_plen, fib_id, ltbl);
