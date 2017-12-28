@@ -16,6 +16,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <arpa/inet.h>
+
 #include "gatekeeper_fib.h"
 #include "gatekeeper_gk.h"
 #include "gatekeeper_main.h"
@@ -1435,4 +1437,206 @@ del_fib_entry(const char *ip_prefix, struct gk_config *gk_conf)
 	rte_spinlock_unlock_tm(&gk_conf->lpm_tbl.lock);
 
 	return ret;
+}
+
+static int
+fillup_gk_fib_dump_entry(struct gk_fib_dump_entry *dentry, struct gk_fib *fib)
+{
+	dentry->action = fib->action;
+	switch (fib->action) {
+	case GK_FWD_GRANTOR:
+		if (fib->u.grantor.gt_addr.proto == ETHER_TYPE_IPv4) {
+			if (inet_ntop(AF_INET, &fib->u.grantor.gt_addr.
+					ip.v4.s_addr, dentry->grantor_ip,
+					sizeof(dentry->grantor_ip))
+					== NULL) {
+				RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv4 address (%s)\n",
+					__func__, strerror(errno));
+				return -1;
+			}
+
+			if (inet_ntop(AF_INET, &fib->u.grantor.eth_cache->
+					ip_addr.ip.v4.s_addr, dentry->nexthop_ip,
+					sizeof(dentry->nexthop_ip))
+					== NULL) {
+				RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv4 address (%s)\n",
+					__func__, strerror(errno));
+				return -1;
+			}
+		} else if (likely(fib->u.grantor.gt_addr.proto ==
+				ETHER_TYPE_IPv6)) {
+			if (inet_ntop(AF_INET6, fib->u.grantor.gt_addr.
+					ip.v6.s6_addr, dentry->grantor_ip,
+					sizeof(dentry->grantor_ip)) ==
+					NULL) {
+				RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv6 address (%s)\n",
+					__func__, strerror(errno));
+				return -1;
+			}
+
+			if (inet_ntop(AF_INET6, fib->u.grantor.eth_cache->
+					ip_addr.ip.v6.s6_addr, dentry->nexthop_ip,
+					sizeof(dentry->nexthop_ip)) ==
+					NULL) {
+				RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv6 address (%s)\n",
+					__func__, strerror(errno));
+				return -1;
+			}
+		} else {
+			rte_panic("Invalid IP protocol (%hhu) at %s with lcore %u\n",
+				fib->u.grantor.gt_addr.proto,
+				__func__, rte_lcore_id());
+		}
+
+		dentry->stale = fib->u.grantor.eth_cache->stale;
+		dentry->ether_type = fib->u.grantor.
+			eth_cache->eth_hdr.ether_type;
+		ether_format_addr(dentry->d_addr, ETHER_ADDR_FMT_SIZE,
+			&fib->u.grantor.eth_cache->eth_hdr.d_addr);
+		ether_format_addr(dentry->s_addr, ETHER_ADDR_FMT_SIZE,
+			&fib->u.grantor.eth_cache->eth_hdr.s_addr);
+		dentry->ref_cnt = fib->u.grantor.eth_cache->ref_cnt;
+		break;
+
+	case GK_FWD_GATEWAY_FRONT_NET:
+		/* FALLTHROUGH */
+	case GK_FWD_GATEWAY_BACK_NET: {
+		struct ipaddr *ip_addr = &fib->u.gateway.eth_cache->ip_addr;
+		if (ip_addr->proto == ETHER_TYPE_IPv4) {
+			if (inet_ntop(AF_INET, &ip_addr->ip.v4.s_addr,
+					dentry->nexthop_ip,
+					sizeof(dentry->nexthop_ip))
+					== NULL) {
+				RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv4 address (%s)\n",
+					__func__, strerror(errno));
+				return -1;
+			}
+		} else if (ip_addr->proto == ETHER_TYPE_IPv6) {
+			if (inet_ntop(AF_INET6, ip_addr->ip.v6.s6_addr,
+					dentry->nexthop_ip,
+					sizeof(dentry->nexthop_ip)) ==
+					NULL) {
+				RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv6 address (%s)\n",
+					__func__, strerror(errno));
+				return -1;
+			}
+		} else {
+			rte_panic("Invalid IP protocol (%hhu) at %s with lcore %u\n",
+				ip_addr->proto, __func__, rte_lcore_id());
+		}
+
+		dentry->stale = fib->u.gateway.eth_cache->stale;
+		dentry->ether_type = fib->u.gateway.
+			eth_cache->eth_hdr.ether_type;
+		ether_format_addr(dentry->d_addr, ETHER_ADDR_FMT_SIZE,
+			&fib->u.gateway.eth_cache->eth_hdr.d_addr);
+		ether_format_addr(dentry->s_addr, ETHER_ADDR_FMT_SIZE,
+			&fib->u.gateway.eth_cache->eth_hdr.s_addr);
+		dentry->ref_cnt = fib->u.gateway.eth_cache->ref_cnt;
+		break;
+	}
+
+	case GK_FWD_NEIGHBOR_FRONT_NET:
+		/* FALLTHROUGH */
+	case GK_FWD_NEIGHBOR_BACK_NET:
+		/* FALLTHROUGH */
+	case GK_DROP:
+		break;
+
+	default:
+		rte_panic("Invalid FIB action (%u) at %s with lcore %u\n",
+			fib->action, __func__, rte_lcore_id());
+		break;
+	}
+
+	return 0;
+}
+
+struct gk_fib_dump_entry *
+list_fib_entries(struct gk_config *gk_conf, uint32_t *num_entries)
+{
+	int i, ret = 0, num_rules;
+	uint8_t ip6[RTE_LPM6_IPV6_ADDR_SIZE];
+	char ip_addr[INET6_ADDRSTRLEN];
+	struct rte_lpm_rule_entry re_tbl[gk_conf->max_num_ipv4_rules];
+	struct rte_lpm6_rule re_tbl6[gk_conf->max_num_ipv6_rules];
+	struct gk_fib *fib;
+	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
+	unsigned num_entries_max = gk_conf->max_num_ipv4_rules +
+		gk_conf->max_num_ipv6_rules;
+	struct gk_fib_dump_entry *tbl;
+
+	if (num_entries == NULL)
+		return NULL;
+	*num_entries = 0;
+
+	tbl = rte_calloc("dump_entry", num_entries_max,
+		sizeof(struct gk_fib_dump_entry), 0);
+	if (tbl == NULL)
+		return NULL;
+
+	rte_spinlock_lock_tm(&gk_conf->lpm_tbl.lock);
+	num_rules = rte_lpm_rule_iterator(ltbl->lpm, 0, 0, re_tbl);
+	if (num_rules < 0)
+		goto err;
+
+	for (i = 0; i < num_rules; i++) {
+		struct rte_lpm_rule_entry *re = &re_tbl[i];
+		struct gk_fib_dump_entry *dentry = &tbl[*num_entries];
+		uint32_t ip_net = htonl(re->ip);
+		if (inet_ntop(AF_INET, &ip_net,
+				ip_addr, sizeof(ip_addr)) == NULL) {
+			RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv4 address (%s)\n",
+				__func__, strerror(errno));
+			goto err;
+		}
+
+		ret = snprintf(dentry->prefix, sizeof(dentry->prefix), \
+			"%s/%hhu", ip_addr, re->depth);
+		RTE_VERIFY(ret > 0 && ret < (int)sizeof(dentry->prefix));
+
+		fib = &ltbl->fib_tbl[re->next_hop];
+		ret = fillup_gk_fib_dump_entry(dentry, fib);
+		if (ret < 0)
+			goto err;
+
+		*num_entries = *num_entries + 1;
+	}
+
+	num_rules = rte_lpm6_rule_iterator(ltbl->lpm6, ip6, 0, re_tbl6);
+	if (num_rules < 0)
+		goto err;
+
+	for (i = 0; i < num_rules; i++) {
+		struct rte_lpm6_rule *re = &re_tbl6[i];
+		struct gk_fib_dump_entry *dentry = &tbl[*num_entries];
+
+		if (inet_ntop(AF_INET6, re->ip,
+				ip_addr, sizeof(ip_addr)) == NULL) {
+			RTE_LOG(ERR, GATEKEEPER, "gk: %s: failed to convert a number to an IPv6 address (%s)\n",
+				__func__, strerror(errno));
+			goto err;
+		}
+
+		ret = snprintf(dentry->prefix, sizeof(dentry->prefix), \
+			"%s/%hhu", ip_addr, re->depth);
+		RTE_VERIFY(ret > 0 && ret < (int)sizeof(dentry->prefix));
+
+		fib = &ltbl->fib_tbl6[re->next_hop];
+		ret = fillup_gk_fib_dump_entry(dentry, fib);
+		if (ret < 0)
+			goto err;
+
+		*num_entries = *num_entries + 1;
+	}
+
+	rte_spinlock_unlock_tm(&gk_conf->lpm_tbl.lock);
+
+	return tbl;
+
+err:
+	rte_spinlock_unlock_tm(&gk_conf->lpm_tbl.lock);
+	rte_free(tbl);
+
+	return NULL;
 }

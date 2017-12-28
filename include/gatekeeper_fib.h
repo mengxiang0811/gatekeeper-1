@@ -134,6 +134,31 @@ struct gk_fib {
 	} u;
 };
 
+struct gk_fib_dump_entry {
+
+	/* The prefix string. */
+	char     prefix[INET6_ADDRSTRLEN + 5];
+
+	/* The Grantor IP address. */
+	char     grantor_ip[INET6_ADDRSTRLEN];
+
+	bool     stale;
+
+	/* The IP address of the nexthop. */
+	char     nexthop_ip[INET6_ADDRSTRLEN];
+
+	uint16_t ether_type;
+
+	char     d_addr[ETHER_ADDR_FMT_SIZE];
+
+	char     s_addr[ETHER_ADDR_FMT_SIZE];
+
+	uint32_t ref_cnt;
+
+	/* The fib action. */
+	enum gk_fib_action action;
+};
+
 /* Structure for the GK global LPM table. */
 struct gk_lpm {
 	/* Use a spin lock to edit the FIB table. */
@@ -163,12 +188,11 @@ struct gk_config;
 int setup_gk_lpm(struct gk_config *gk_conf, unsigned int socket_id);
 void destroy_neigh_hash_table(struct neighbor_hash_table *neigh);
 
-/*
- * TODO Add support for listing GK FIB entries.
- */
 int add_fib_entry(const char *prefix, const char *gt_ip, const char *gw_ip,
 	enum gk_fib_action action, struct gk_config *gk_conf);
 int del_fib_entry(const char *ip_prefix, struct gk_config *gk_conf);
+struct gk_fib_dump_entry *list_fib_entries(struct gk_config *gk_conf,
+	uint32_t *num_entries);
 
 /* TODO Customize the hash function for IPv4. */
 
