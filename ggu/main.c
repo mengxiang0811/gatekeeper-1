@@ -34,6 +34,7 @@
 #include "gatekeeper_launch.h"
 #include "gatekeeper_l2.h"
 #include "gatekeeper_varip.h"
+#include "gatekeeper_ratelimit.h"
 
 /* XXX Sample parameter, needs to be tested for better performance. */
 #define GGU_REQ_BURST_SIZE (32)
@@ -90,7 +91,7 @@ process_single_policy(const struct ggu_policy *policy, const struct ggu_config *
 		break;
 
 	default:
-		RTE_LOG(ERR, GATEKEEPER, "ggu: impossible policy state %hhu\n",
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "ggu: impossible policy state %hhu\n",
 			policy->state);
 		mb_free_entry(mb, entry);
 		return;
@@ -128,7 +129,7 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 		minimum_size += sizeof(struct ipv4_hdr) +
 			sizeof(struct udp_hdr) + sizeof(struct ggu_common_hdr);
 		if (pkt->data_len < minimum_size) {
-			RTE_LOG(NOTICE, GATEKEEPER,
+			RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 				"ggu: the IPv4 packet's actual size is %hu, which doesn't have the minimum expected size %hu\n",
 				pkt->data_len, minimum_size);
 			goto free_packet;
@@ -136,14 +137,14 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 
 		ip4hdr = l3_hdr;
 		if (ip4hdr->next_proto_id != IPPROTO_UDP) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"ggu: received non-UDP packets, IPv4 %s bug!\n",
 				filter_name(back));
 			goto free_packet;
 		}
 
 		if (ip4hdr->dst_addr != back->ip4_addr.s_addr) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"ggu: received packets not destined to the Gatekeeper server, IPv4 %s bug!\n",
 				filter_name(back));
 			goto free_packet;
@@ -151,7 +152,7 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 
 		minimum_size += ipv4_hdr_len(ip4hdr) - sizeof(*ip4hdr);
 		if (pkt->data_len < minimum_size) {
-			RTE_LOG(NOTICE, GATEKEEPER,
+			RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 				"ggu: the IPv4 packet's actual size is %hu, which doesn't have the minimum expected size %hu\n",
 				pkt->data_len, minimum_size);
 			goto free_packet;
@@ -175,7 +176,7 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 		minimum_size += sizeof(struct ipv6_hdr) +
 			sizeof(struct udp_hdr) + sizeof(struct ggu_common_hdr);
 		if (pkt->data_len < minimum_size) {
-			RTE_LOG(NOTICE, GATEKEEPER,
+			RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 				"ggu: the IPv6 packet's actual size is %hu, which doesn't have the minimum expected size %hu\n",
 				pkt->data_len, minimum_size);
 			goto free_packet;
@@ -196,7 +197,7 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 		if (back->hw_filter_ntuple && memcmp(ip6hdr->dst_addr,
 				back->ip6_addr.s6_addr,
 				sizeof(ip6hdr->dst_addr)) != 0) {
-			RTE_LOG(NOTICE, GATEKEEPER,
+			RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 				"ggu: received an IPv6 packet destinated to other host!\n");
 			return;
 		}
@@ -204,13 +205,13 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 		udp_offset = ipv6_skip_exthdr(ip6hdr, pkt->data_len - l2_len,
 			&nexthdr);
 		if (udp_offset < 0) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"ggu: failed to parse the IPv6 packet's extension headers!\n");
 			goto free_packet;
 		}
 
 		if (nexthdr != IPPROTO_UDP) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"ggu: received non-UDP packets, IPv6 %s bug!\n",
 				filter_name(back));
 			goto free_packet;
@@ -218,7 +219,7 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 
 		minimum_size += udp_offset - sizeof(*ip6hdr);
 		if (pkt->data_len < minimum_size) {
-			RTE_LOG(NOTICE, GATEKEEPER,
+			RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 				"ggu: the IPv6 packet's actual size is %hu, which doesn't have the minimum expected size %hu\n",
 				pkt->data_len, minimum_size);
 			goto free_packet;
@@ -229,7 +230,7 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 	}
 
 	default:
-		RTE_LOG(NOTICE, GATEKEEPER,
+		RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 			"ggu: unknown network layer protocol %hu\n",
 			ether_type);
 		goto free_packet;
@@ -238,7 +239,7 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 
 	if (udphdr->src_port != ggu_conf->ggu_src_port ||
 			udphdr->dst_port != ggu_conf->ggu_dst_port) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"ggu: unknown udp src port %hu, dst port %hu, %s bug!\n",
 			rte_be_to_cpu_16(udphdr->src_port),
 			rte_be_to_cpu_16(udphdr->dst_port),
@@ -250,7 +251,7 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 
 	gguhdr = (struct ggu_common_hdr *)&udphdr[1];
 	if (gguhdr->v1 != GGU_PD_VER1) {
-		RTE_LOG(NOTICE, GATEKEEPER,
+		RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 			"ggu: unknown policy decision format %hhu\n",
 			gguhdr->v1);
 		goto free_packet;
@@ -265,7 +266,7 @@ process_single_packet(struct rte_mbuf *pkt, const struct ggu_config *ggu_conf)
 		(gguhdr->n1 + gguhdr->n2) * sizeof(policy.params.u.declined) + 
 		(gguhdr->n3 + gguhdr->n4) * sizeof(policy.params.u.granted);
 	if (real_payload_len < expected_payload_len) {
-		RTE_LOG(NOTICE, GATEKEEPER,
+		RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 			"ggu: the size (%hu) of the payload available in the UDP header doesn't match the expected size (%hu)!\n",
 			real_payload_len, expected_payload_len);
 		goto free_packet;
@@ -348,7 +349,7 @@ submit_ggu(struct rte_mbuf **pkts, unsigned int num_pkts,
 	RTE_VERIFY(num_pkts <= ggu_conf->mailbox_max_pkt_burst);
 
 	if (req == NULL) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"ggu: %s: allocation of mailbox message failed\n",
 			__func__);
 		ret = -ENOMEM;
@@ -360,7 +361,7 @@ submit_ggu(struct rte_mbuf **pkts, unsigned int num_pkts,
 
 	ret = mb_send_entry(&ggu_conf->mailbox, req);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"ggu: %s: failed to enqueue message to mailbox\n",
 			__func__);
 		goto free_pkts;
@@ -384,7 +385,7 @@ ggu_proc(void *arg)
 	unsigned int i;
 	uint16_t ggu_max_pkt_burst = ggu_conf->ggu_max_pkt_burst;
 
-	RTE_LOG(NOTICE, GATEKEEPER,
+	RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 		"ggu: the GK-GT unit is running at lcore = %u\n", lcore);
 
 	/*
@@ -423,7 +424,7 @@ ggu_proc(void *arg)
 		}
 	}
 
-	RTE_LOG(NOTICE, GATEKEEPER,
+	RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 		"ggu: the GK-GT unit at lcore = %u is exiting\n", lcore);
 	return cleanup_ggu(ggu_conf);
 }
@@ -435,7 +436,7 @@ ggu_stage1(void *arg)
 	int ret = get_queue_id(&ggu_conf->net->back, QUEUE_TYPE_RX,
 		ggu_conf->lcore_id);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER, "ggu: cannot assign an RX queue for the back interface for lcore %u\n",
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "ggu: cannot assign an RX queue for the back interface for lcore %u\n",
 			ggu_conf->lcore_id);
 		return ret;
 	}
@@ -524,7 +525,7 @@ ggu_stage2(void *arg)
 		ret = register_ipv4_acl(&ipv4_rule, 1,
 			submit_ggu, NULL, &ggu_conf->net->back);
 		if (ret < 0) {
-			RTE_LOG(ERR, GATEKEEPER, "ggu: could not register IPv4 GGU ACL on back iface\n");
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "ggu: could not register IPv4 GGU ACL on back iface\n");
 			return ret;
 		}
 	}
@@ -534,7 +535,7 @@ ggu_stage2(void *arg)
 		ret = register_ipv6_acl(&ipv6_rule, 1,
 			submit_ggu, NULL, &ggu_conf->net->back);
 		if (ret < 0) {
-			RTE_LOG(ERR, GATEKEEPER, "ggu: could not register IPv6 GGU ACL on back iface\n");
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "ggu: could not register IPv6 GGU ACL on back iface\n");
 			return ret;
 		}
 	}
@@ -554,7 +555,7 @@ run_ggu(struct net_config *net_conf,
 	}
 
 	if (!net_conf->back_iface_enabled) {
-		RTE_LOG(ERR, GATEKEEPER, "ggu: back interface is required\n");
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "ggu: back interface is required\n");
 		ret = -1;
 		goto out;
 	}
@@ -621,7 +622,7 @@ alloc_ggu_conf(void)
 			sizeof(struct ggu_config), 0);
 		return ggu_conf;
 	} else {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"ggu: trying to allocate the second instance of struct ggu_config\n");
 		return NULL;
 	}
