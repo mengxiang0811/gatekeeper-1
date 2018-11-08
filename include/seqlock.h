@@ -30,6 +30,7 @@
 #include <rte_spinlock.h>
 
 #include "gatekeeper_main.h"
+#include "gatekeeper_ratelimit.h"
 
 /*
  * Reader/writer consistent mechanism without starving writers. This type of
@@ -70,7 +71,7 @@ __read_once_size(const volatile void *p, void *res, int size)
 		break;
 
  	default:
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"seqlock: Data access exceeds word size and won't be atomic\n");
 		break;
 	}
