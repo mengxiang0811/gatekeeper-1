@@ -34,6 +34,7 @@
 #include "gatekeeper_main.h"
 #include "gatekeeper_config.h"
 #include "gatekeeper_launch.h"
+#include "gatekeeper_ratelimit.h"
 
 /* TODO Get the install path from the configuration file. */
 #define LUA_DY_BASE_DIR     "./lua"
@@ -73,13 +74,13 @@ write_nbytes(int conn_fd, const char *msg_buff, int nbytes)
 
 	/* The connection with the client is closed. */
 	if (send_size == 0) {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"dyn_cfg: Client disconnected\n");
 		return -1;
 	}
 
 	if (send_size < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: Failed to write data to the socket connection - (%s)\n",
 			strerror(errno));
 		return -1;
@@ -129,7 +130,7 @@ process_client_message(int conn_fd,
 		"Dynamic configuration: the reply was NULL.";
 
 	if (msg_len == 0) {
-		RTE_LOG(WARNING, LUA,
+		RTE_LOG_RATELIMIT(WARNING, LUA,
 			"dyn_cfg: the received message is an empty string\n");
 		return reply_client_message(conn_fd,
 			CLIENT_EMPTY_ERROR, strlen(CLIENT_EMPTY_ERROR));
@@ -146,29 +147,29 @@ process_client_message(int conn_fd,
 			strncpy(truncated_reply_msg, reply_msg, MSG_MAX_LEN);
 			truncated_reply_msg[MSG_MAX_LEN - 1] = '\0';
 
-			RTE_LOG(ERR, LUA, "dyn_cfg: %s!\n", truncated_reply_msg);
+			RTE_LOG_RATELIMIT(ERR, LUA, "dyn_cfg: %s!\n", truncated_reply_msg);
 
-			RTE_LOG(WARNING, LUA,
+			RTE_LOG_RATELIMIT(WARNING, LUA,
 				"dyn_cfg: The error message length (%lu) exceeds the limit!\n",
 				reply_len);
 
 			reply_len = MSG_MAX_LEN;
 		} else
-			RTE_LOG(ERR, LUA, "dyn_cfg: %s!\n", reply_msg);
+			RTE_LOG_RATELIMIT(ERR, LUA, "dyn_cfg: %s!\n", reply_msg);
 
 		return reply_client_message(conn_fd, reply_msg, reply_len);
 	}
 
 	reply_msg = luaL_checklstring(lua_state, -1, &reply_len);
 	if (reply_msg == NULL) {
-		RTE_LOG(ERR, LUA,
+		RTE_LOG_RATELIMIT(ERR, LUA,
 			"dyn_cfg: The client request script returns a NULL string!\n");
 		return reply_client_message(conn_fd,
 			CLIENT_PROC_ERROR, strlen(CLIENT_PROC_ERROR));
 	}
 
 	if (reply_len > MSG_MAX_LEN) {
-		RTE_LOG(WARNING, LUA,
+		RTE_LOG_RATELIMIT(WARNING, LUA,
 			"dyn_cfg: The reply message length (%lu) exceeds the limit!\n",
 			reply_len);
 		reply_len = MSG_MAX_LEN;
@@ -197,13 +198,13 @@ read_nbytes(int conn_fd, char *msg_buff, int nbytes)
 
 	/* The connection with the client is closed. */
 	if (recv_size == 0) {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"dyn_cfg: Client disconnected\n");
 		return -1;
 	}
 
 	if (recv_size < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: Failed to read data from the socket connection - (%s)\n",
 			strerror(errno));
 		return -1;
@@ -262,7 +263,7 @@ cleanup_dy(struct dynamic_config *dy_conf)
 	if (dy_conf->sock_fd != -1) {
 		ret = close(dy_conf->sock_fd);
 		if (ret < 0) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"dyn_cfg: Failed to close the server socket - (%s)\n",
 				strerror(errno));
 		}
@@ -272,7 +273,7 @@ cleanup_dy(struct dynamic_config *dy_conf)
 	if (dy_conf->server_path != NULL) {
 		ret = unlink(dy_conf->server_path);
 		if (ret != 0) {
-			RTE_LOG(WARNING, GATEKEEPER,
+			RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 				"dyn_cfg: Failed to unlink(%s) - (%s)\n",
 				dy_conf->server_path, strerror(errno));
 		}
@@ -296,14 +297,14 @@ setup_dy_lua(lua_State *lua_state)
 	set_lua_path(lua_state, LUA_DY_BASE_DIR);
 	ret = luaL_loadfile(lua_state, lua_entry_path);
 	if (ret != 0) {
-		RTE_LOG(ERR, LUA,
+		RTE_LOG_RATELIMIT(ERR, LUA,
 			"dyn_cfg: %s!\n", lua_tostring(lua_state, -1));
 		return -1;
 	}
 
 	ret = lua_pcall(lua_state, 0, 0, 0);
 	if (ret != 0) {
-		RTE_LOG(ERR, LUA,
+		RTE_LOG_RATELIMIT(ERR, LUA,
 			"dyn_cfg: %s!\n", lua_tostring(lua_state, -1));
 		return -1;
 	}
@@ -327,14 +328,14 @@ handle_client(int server_socket_fd, struct dynamic_config *dy_conf)
 	conn_fd = accept(server_socket_fd,
 		(struct sockaddr *)&client_addr, &len);
 	if (conn_fd < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: Failed to accept a new connection - (%s)\n",
 			strerror(errno));
 		return;
 	}
 
 	if (unlikely(client_addr.sun_family != AF_UNIX)) {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"Unexpected condition: unknown client type %d at %s\n",
 			client_addr.sun_family, __func__);
 		goto close_fd;
@@ -347,7 +348,7 @@ handle_client(int server_socket_fd, struct dynamic_config *dy_conf)
 	ret = setsockopt(conn_fd, SOL_SOCKET, SO_RCVTIMEO,
 		(const char*)&dy_conf->rcv_time_out, sizeof(struct timeval));
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: Failed to call setsockopt(SO_RCVTIMEO) - (%s)\n",
 			strerror(errno));
 		goto close_fd;
@@ -357,7 +358,7 @@ handle_client(int server_socket_fd, struct dynamic_config *dy_conf)
 	ret = setsockopt(conn_fd, SOL_SOCKET,
 		SO_RCVBUF, &rcv_buff_size, sizeof(rcv_buff_size));
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: Failed to call setsockopt(SO_RCVBUF) with size = %d - (%s)\n",
 			rcv_buff_size, strerror(errno));
 		goto close_fd;
@@ -365,7 +366,7 @@ handle_client(int server_socket_fd, struct dynamic_config *dy_conf)
 
 	lua_state = luaL_newstate();
 	if (lua_state == NULL) {
-		RTE_LOG(ERR, LUA,
+		RTE_LOG_RATELIMIT(ERR, LUA,
 			"dyn_cfg: failed to create new Lua state!\n");
 		goto close_fd;
 	}
@@ -373,7 +374,7 @@ handle_client(int server_socket_fd, struct dynamic_config *dy_conf)
 	/* Set up the Lua state while there is a connection. */
 	ret = setup_dy_lua(lua_state);
 	if (ret < 0) {
-		RTE_LOG(ERR, LUA,
+		RTE_LOG_RATELIMIT(ERR, LUA,
 			"dyn_cfg: Failed to set up the lua state\n");
 		goto close_lua;
 	}
@@ -390,7 +391,7 @@ close_lua:
 close_fd:
 	ret = close(conn_fd);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: Failed to close the connection socket - (%s)\n",
 			strerror(errno));
 	}
@@ -403,7 +404,7 @@ dyn_cfg_proc(void *arg)
 	struct dynamic_config *dy_conf = arg;
 	uint32_t lcore = dy_conf->lcore_id;
 
-	RTE_LOG(NOTICE, GATEKEEPER,
+	RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 		"dyn_cfg: the Dynamic Config block is running at lcore = %u\n", lcore);
 
 	while (likely(!exiting)) {
@@ -424,7 +425,7 @@ dyn_cfg_proc(void *arg)
 
 		ret = select(dy_conf->sock_fd + 1, &fds, NULL, NULL, &stv);
 		if (ret < 0 && errno != EINTR) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"dyn_cfg: Failed to call the select() function - (%s)\n",
 				strerror(errno));
 			break;
@@ -441,7 +442,7 @@ dyn_cfg_proc(void *arg)
 		handle_client(dy_conf->sock_fd, dy_conf);
 	}
 
-	RTE_LOG(NOTICE, GATEKEEPER,
+	RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 		"dyn_cfg: the Dynamic Config block at lcore = %u is exiting\n", lcore);
 
 	cleanup_dy(dy_conf);
@@ -499,7 +500,7 @@ run_dynamic_config(struct gk_config *gk_conf,
 	 */
 	ret = unlink(dy_conf->server_path);
 	if (ret != 0 && errno != ENOENT) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: Failed to unlink(%s) - (%s)\n",
 			dy_conf->server_path, strerror(errno));
 		ret = -1;
@@ -509,7 +510,7 @@ run_dynamic_config(struct gk_config *gk_conf,
 	/* Init the server socket. */
     	dy_conf->sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (dy_conf->sock_fd < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: Failed to initialize the server socket - (%s)\n",
 			strerror(errno));
 		ret = -1;
@@ -521,7 +522,7 @@ run_dynamic_config(struct gk_config *gk_conf,
     	server_addr.sun_family = AF_UNIX;
 
 	if (sizeof(server_addr.sun_path) <= strlen(dy_conf->server_path)) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: the server path (%s) exceeds the length limit %lu\n",
 			dy_conf->server_path, sizeof(server_addr.sun_path));
 		ret = -1;
@@ -533,7 +534,7 @@ run_dynamic_config(struct gk_config *gk_conf,
     	ret = bind(dy_conf->sock_fd,
 		(struct sockaddr *)&server_addr, sizeof(server_addr));
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: Failed to bind the server socket - (%s)\n",
 			strerror(errno));
 		ret = -1;
@@ -546,7 +547,7 @@ run_dynamic_config(struct gk_config *gk_conf,
 	 */
     	ret = listen(dy_conf->sock_fd, 10);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"dyn_cfg: Failed to listen on the server socket - (%s)\n",
 			strerror(errno));
 		ret = -1;
