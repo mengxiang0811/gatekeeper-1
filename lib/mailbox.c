@@ -23,6 +23,7 @@
 
 #include "gatekeeper_main.h"
 #include "gatekeeper_mailbox.h"
+#include "gatekeeper_ratelimit.h"
 
 /* XXX Sample parameters, need to be tested for better performance. */
 #define GK_MEM_CACHE_SIZE (64)
@@ -43,7 +44,7 @@ init_mailbox(const char *tag,
 	mb->ring = (struct rte_ring *)rte_ring_create(
 		ring_name, ele_count, socket_id, RING_F_SC_DEQ);
     	if (mb->ring == NULL) {
-		RTE_LOG(ERR, RING,
+		RTE_LOG_RATELIMIT(ERR, RING,
 			"mailbox: can't create ring %s (len = %d) at lcore %u!\n",
 			ring_name, ret, lcore_id);
 		ret = -1;
@@ -58,7 +59,7 @@ init_mailbox(const char *tag,
 		pool_name, ele_count, ele_size, GK_MEM_CACHE_SIZE,
 		0, NULL, NULL, NULL, NULL, socket_id, 0);
     	if (mb->pool == NULL) {
-		RTE_LOG(ERR, MEMPOOL,
+		RTE_LOG_RATELIMIT(ERR, MEMPOOL,
 			"mailbox: can't create mempool %s (len = %d) at lcore %u!\n",
 			pool_name, ret, lcore_id);
 		ret = -1;
@@ -80,7 +81,7 @@ mb_alloc_entry(struct mailbox *mb)
 	void *obj = NULL;
 	int ret = rte_mempool_get(mb->pool, &obj);
 	if (ret == -ENOENT) {
-		RTE_LOG(ERR, MEMPOOL,
+		RTE_LOG_RATELIMIT(ERR, MEMPOOL,
 			"mailbox: not enough entries in the mempool.\n");
 		return NULL;
 	}
@@ -95,11 +96,11 @@ mb_send_entry(struct mailbox *mb, void *obj)
 {
 	int ret = rte_ring_mp_enqueue(mb->ring, obj);
 	if (ret == -EDQUOT) {
-		RTE_LOG(WARNING, RING,
+		RTE_LOG_RATELIMIT(WARNING, RING,
 			"mailbox: high water mark exceeded. The object has been enqueued.\n");
 		ret = 0;
 	} else if (ret == -ENOBUFS) {
-		RTE_LOG(ERR, RING,
+		RTE_LOG_RATELIMIT(ERR, RING,
 			"mailbox: quota exceeded. Not enough room in the ring to enqueue.\n");
 		mb_free_entry(mb, obj);
 	} else
