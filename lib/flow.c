@@ -25,6 +25,7 @@
 #include "gatekeeper_net.h"
 #include "gatekeeper_flow.h"
 #include "gatekeeper_main.h"
+#include "gatekeeper_ratelimit.h"
 
 /*
  * Optimized generic implementation of RSS hash function.
@@ -122,28 +123,28 @@ print_flow_err_msg(struct ip_flow *flow, const char *err_msg)
 	if (flow->proto == ETHER_TYPE_IPv4) {
 		if (inet_ntop(AF_INET, &flow->f.v4.src,
 				src, sizeof(src)) == NULL) {
-			RTE_LOG(ERR, GATEKEEPER, "%s: failed to convert a number to an IPv4 address (%s)\n",
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "%s: failed to convert a number to an IPv4 address (%s)\n",
 				__func__, strerror(errno));
 			return;
 		}
 
 		if (inet_ntop(AF_INET, &flow->f.v4.dst,
 				dst, sizeof(dst)) == NULL) {
-			RTE_LOG(ERR, GATEKEEPER, "%s: failed to convert a number to an IPv4 address (%s)\n",
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "%s: failed to convert a number to an IPv4 address (%s)\n",
 				__func__, strerror(errno));
 			return;
 		}
 	} else if (likely(flow->proto == ETHER_TYPE_IPv6)) {
 		if (inet_ntop(AF_INET6, flow->f.v6.src,
 				src, sizeof(src)) == NULL) {
-			RTE_LOG(ERR, GATEKEEPER, "%s: failed to convert a number to an IPv6 address (%s)\n",
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "%s: failed to convert a number to an IPv6 address (%s)\n",
 				__func__, strerror(errno));
 			return;
 		}
 
 		if (inet_ntop(AF_INET6, flow->f.v6.dst,
 				dst, sizeof(dst)) == NULL) {
-			RTE_LOG(ERR, GATEKEEPER, "%s: failed to convert a number to an IPv6 address (%s)\n",
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "%s: failed to convert a number to an IPv6 address (%s)\n",
 				__func__, strerror(errno));
 			return;
 		}
@@ -151,7 +152,7 @@ print_flow_err_msg(struct ip_flow *flow, const char *err_msg)
 		rte_panic("Unexpected condition at %s: unknown flow type %hu!\n",
 			__func__, flow->proto);
 
-	RTE_LOG(ERR, GATEKEEPER,
+	RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 		"%s for the flow with IP source address %s, and destination address %s!\n",
 		err_msg, src, dst);
 }
