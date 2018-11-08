@@ -25,6 +25,7 @@
 #include "gatekeeper_launch.h"
 #include "gatekeeper_lls.h"
 #include "gatekeeper_varip.h"
+#include "gatekeeper_ratelimit.h"
 #include "kni.h"
 
 /*
@@ -93,7 +94,7 @@ send_arp_reply_kni(struct cps_config *cps_conf, struct cps_arp_req *arp)
 		rte_lcore_to_socket_id(cps_conf->lcore_id)];
 	created_pkt = rte_pktmbuf_alloc(mp);
 	if (created_pkt == NULL) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"cps: could not allocate an ARP reply on the %s KNI\n",
 			iface->name);
 		return;
@@ -134,7 +135,7 @@ send_arp_reply_kni(struct cps_config *cps_conf, struct cps_arp_req *arp)
 	ret = rte_kni_tx_burst(kni, &created_pkt, 1);
 	if (ret <= 0) {
 		rte_pktmbuf_free(created_pkt);
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"cps: could not transmit an ARP reply to the %s KNI\n",
 			iface->name);
 		return;
@@ -159,7 +160,7 @@ send_nd_reply_kni(struct cps_config *cps_conf, struct cps_nd_req *nd)
 		rte_lcore_to_socket_id(cps_conf->lcore_id)];
 	created_pkt = rte_pktmbuf_alloc(mp);
 	if (created_pkt == NULL) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"cps: could not allocate an ND advertisement on the %s KNI\n",
 			iface->name);
 		return;
@@ -220,7 +221,7 @@ send_nd_reply_kni(struct cps_config *cps_conf, struct cps_nd_req *nd)
 	ret = rte_kni_tx_burst(kni, &created_pkt, 1);
 	if (ret <= 0) {
 		rte_pktmbuf_free(created_pkt);
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"cps: could not transmit an ND advertisement to the %s KNI\n",
 			iface->name);
 		return;
@@ -281,7 +282,7 @@ process_reqs(struct cps_config *cps_conf)
 			break;
 		}
 		default:
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"cps: unrecognized request type (%d)\n",
 				reqs[i]->ty);
 			break;
@@ -300,7 +301,7 @@ process_kni_request(struct rte_kni *kni)
 	 * requests and allows them to be processed.
 	 */
 	if (rte_kni_handle_request(kni) < 0)
-		RTE_LOG(WARNING, KNI,
+		RTE_LOG_RATELIMIT(WARNING, KNI,
 			"%s: error in handling userspace request on KNI %s\n",
 			__func__, rte_kni_get_name(kni));
 }
@@ -332,7 +333,7 @@ process_ingress(struct gatekeeper_if *iface, struct rte_kni *kni,
 
 		if (unlikely(eth_hdr->ether_type !=
 				rte_cpu_to_be_16(ETHER_TYPE_VLAN))) {
-			RTE_LOG(WARNING, GATEKEEPER,
+			RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 				"cps: %s iface is configured for VLAN but received a non-VLAN packet\n",
 				iface->name);
 			goto to_kni;
@@ -347,7 +348,7 @@ process_ingress(struct gatekeeper_if *iface, struct rte_kni *kni,
 		/* Remove the unneeded bytes from the front of the buffer. */
 		if (unlikely(rte_pktmbuf_adj(rx_bufs[i],
 				sizeof(struct vlan_hdr)) == NULL)) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"cps: can't remove VLAN header\n");
 			rte_pktmbuf_free(rx_bufs[i]);
 			continue;
@@ -446,7 +447,7 @@ process_egress(struct cps_config *cps_conf, struct gatekeeper_if *iface,
 				rte_pktmbuf_prepend(bufs[i],
 					sizeof(struct vlan_hdr));
 			if (unlikely(new_eth_hdr == NULL)) {
-				RTE_LOG(ERR, GATEKEEPER,
+				RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 					"cps: can't add a VLAN header\n");
 				rte_pktmbuf_free(bufs[i]);
 				continue;
@@ -481,7 +482,7 @@ cps_proc(void *arg)
 	struct rte_kni *front_kni = cps_conf->front_kni;
 	struct rte_kni *back_kni = cps_conf->back_kni;
 
-	RTE_LOG(NOTICE, GATEKEEPER,
+	RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 		"cps: the CPS block is running at lcore = %u\n",
 		cps_conf->lcore_id);
 
@@ -531,7 +532,7 @@ cps_proc(void *arg)
 		kni_cps_route_event(cps_conf);
 	}
 
-	RTE_LOG(NOTICE, GATEKEEPER,
+	RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER,
 		"cps: the CPS block at lcore = %u is exiting\n",
 		cps_conf->lcore_id);
 
@@ -550,7 +551,7 @@ submit_bgp(struct rte_mbuf **pkts, unsigned int num_pkts,
 	RTE_VERIFY(num_pkts <= cps_conf->mailbox_max_pkt_burst);
 
 	if (req == NULL) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"cps: %s: allocation of mailbox message failed\n",
 			__func__);
 		ret = -ENOMEM;
@@ -566,7 +567,7 @@ submit_bgp(struct rte_mbuf **pkts, unsigned int num_pkts,
 
 	ret = mb_send_entry(&cps_conf->mailbox, req);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"cps: %s: failed to enqueue message to mailbox\n",
 			__func__);
 		goto free_pkts;
@@ -612,7 +613,7 @@ assign_cps_queue_ids(struct cps_config *cps_conf)
 	return 0;
 
 fail:
-	RTE_LOG(ERR, GATEKEEPER, "cps: cannot assign queues\n");
+	RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "cps: cannot assign queues\n");
 	return ret;
 }
 
@@ -663,7 +664,7 @@ kni_create(struct rte_kni **kni, struct rte_mempool *mp,
 			goto nodev;
 	} else {
 nodev:
-		RTE_LOG(ERR, KNI,
+		RTE_LOG_RATELIMIT(ERR, KNI,
 			"Could not create KNI %s for iface with no dev/PCI data\n",
 			conf.name);
 		return -1;
@@ -680,7 +681,7 @@ nodev:
 
 	*kni = rte_kni_alloc(mp, &conf, &ops);
 	if (*kni == NULL) {
-		RTE_LOG(ERR, KNI, "Could not allocate KNI for %s iface\n",
+		RTE_LOG_RATELIMIT(ERR, KNI, "Could not allocate KNI for %s iface\n",
 			iface->name);
 		return -1;
 	}
@@ -742,7 +743,7 @@ cps_stage1(void *arg)
 		cps_conf->net->gatekeeper_pktmbuf_pool[socket_id],
 		&cps_conf->net->front);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"cps: failed to create KNI for the front iface\n");
 		goto error;
 	}
@@ -752,7 +753,7 @@ cps_stage1(void *arg)
 			cps_conf->net->gatekeeper_pktmbuf_pool[socket_id],
 			&cps_conf->net->back);
 		if (ret < 0) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"cps: failed to create KNI for the back iface\n");
 			goto error;
 		}
@@ -844,7 +845,7 @@ match_bgp4(struct rte_mbuf *pkt, struct gatekeeper_if *iface)
 		return -ENOENT;
 
 	if (pkt->data_len < minimum_size) {
-		RTE_LOG(NOTICE, GATEKEEPER, "cps: IPv4 BGP packet received is %"PRIx16" bytes but should be at least %hu bytes\n",
+		RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER, "cps: IPv4 BGP packet received is %"PRIx16" bytes but should be at least %hu bytes\n",
 			pkt->data_len, minimum_size);
 		return -ENOENT;
 	}
@@ -858,7 +859,7 @@ match_bgp4(struct rte_mbuf *pkt, struct gatekeeper_if *iface)
 	minimum_size = sizeof(*eth_hdr) + ipv4_hdr_len(ip4hdr) +
 		sizeof(*tcp_hdr);
 	if (pkt->data_len < minimum_size) {
-		RTE_LOG(NOTICE, GATEKEEPER, "cps: IPv4 BGP packet received is %"PRIx16" bytes but should be at least %hu bytes\n",
+		RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER, "cps: IPv4 BGP packet received is %"PRIx16" bytes but should be at least %hu bytes\n",
 			pkt->data_len, minimum_size);
 		return -ENOENT;
 	}
@@ -901,7 +902,7 @@ match_bgp6(struct rte_mbuf *pkt, struct gatekeeper_if *iface)
 		return -ENOENT;
 
 	if (pkt->data_len < minimum_size) {
-		RTE_LOG(NOTICE, GATEKEEPER, "cps: IPv6 BGP packet received is %"PRIx16" bytes but should be at least %hu bytes\n",
+		RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER, "cps: IPv6 BGP packet received is %"PRIx16" bytes but should be at least %hu bytes\n",
 			pkt->data_len, minimum_size);
 		return -ENOENT;
 	}
@@ -916,7 +917,7 @@ match_bgp6(struct rte_mbuf *pkt, struct gatekeeper_if *iface)
 
 	minimum_size += tcp_offset - sizeof(*ip6hdr);
 	if (pkt->data_len < minimum_size) {
-		RTE_LOG(NOTICE, GATEKEEPER, "cps: IPv6 BGP packet received is %"PRIx16" bytes but should be at least %hu bytes\n",
+		RTE_LOG_RATELIMIT(NOTICE, GATEKEEPER, "cps: IPv6 BGP packet received is %"PRIx16" bytes but should be at least %hu bytes\n",
 			pkt->data_len, minimum_size);
 		return -ENOENT;
 	}
@@ -944,7 +945,7 @@ add_bgp_filters(struct gatekeeper_if *iface, uint16_t tcp_port_bgp,
 				rte_cpu_to_be_16(tcp_port_bgp), UINT16_MAX,
 				0, 0, IPPROTO_TCP, rx_queue, true, false);
 			if (ret < 0) {
-				RTE_LOG(ERR, GATEKEEPER,
+				RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 					"cps: could not add source IPv4 BGP filter on %s iface\n",
 					iface->name);
 				return ret;
@@ -956,7 +957,7 @@ add_bgp_filters(struct gatekeeper_if *iface, uint16_t tcp_port_bgp,
 				rte_cpu_to_be_16(tcp_port_bgp), UINT16_MAX,
 				IPPROTO_TCP, rx_queue, true, false);
 			if (ret < 0) {
-				RTE_LOG(ERR, GATEKEEPER,
+				RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 					"cps: could not add destination IPv4 BGP filter on %s iface\n",
 					iface->name);
 				return ret;
@@ -977,7 +978,7 @@ add_bgp_filters(struct gatekeeper_if *iface, uint16_t tcp_port_bgp,
 			ret = register_ipv4_acl(ipv4_rules, NUM_ACL_BGP_RULES,
 				submit_bgp, match_bgp4, iface);
 			if (ret < 0) {
-				RTE_LOG(ERR, GATEKEEPER,
+				RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 					"cps: could not register BGP IPv4 ACL on %s iface\n",
 					iface->name);
 				return ret;
@@ -999,7 +1000,7 @@ add_bgp_filters(struct gatekeeper_if *iface, uint16_t tcp_port_bgp,
 		ret = register_ipv6_acl(ipv6_rules, NUM_ACL_BGP_RULES,
 			submit_bgp, match_bgp6, iface);
 		if (ret < 0) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"cps: could not register BGP IPv6 ACL on %s iface\n",
 				iface->name);
 			return ret;
@@ -1018,14 +1019,14 @@ cps_stage2(void *arg)
 	ret = add_bgp_filters(&cps_conf->net->front,
 		cps_conf->tcp_port_bgp, cps_conf->rx_queue_front);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"cps: failed to add BGP filters on the front iface");
 		goto error;
 	}
 
 	ret = kni_config(cps_conf->front_kni, &cps_conf->net->front);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"cps: failed to configure KNI on the front iface\n");
 		goto error;
 	}
@@ -1034,14 +1035,14 @@ cps_stage2(void *arg)
 		ret = add_bgp_filters(&cps_conf->net->back,
 			cps_conf->tcp_port_bgp, cps_conf->rx_queue_back);
 		if (ret < 0) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"cps: failed to add BGP filters on the back iface");
 			goto error;
 		}
 
 		ret = kni_config(cps_conf->back_kni, &cps_conf->net->back);
 		if (ret < 0) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"cps: failed to configure KNI on the back iface\n");
 			goto error;
 		}
@@ -1049,7 +1050,7 @@ cps_stage2(void *arg)
 
 	ret = route_event_sock_open(cps_conf);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"cps: failed to open route event socket\n");
 		goto error;
 	}
@@ -1092,7 +1093,7 @@ run_cps(struct net_config *net_conf, struct gk_config *gk_conf,
 
 	ret = init_kni(kni_kmod_path, net_conf->back_iface_enabled ? 2 : 1);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER, "cps: couldn't initialize KNI\n");
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "cps: couldn't initialize KNI\n");
 		goto stage3;
 	}
 
@@ -1128,7 +1129,7 @@ run_cps(struct net_config *net_conf, struct gk_config *gk_conf,
 		CPS_SCAN_INTERVAL_SEC * rte_get_timer_hz(), PERIODICAL,
 		cps_conf->lcore_id, cps_scan, cps_conf);
 	if (ret < 0) {
-		RTE_LOG(ERR, TIMER, "Cannot set CPS scan timer\n");
+		RTE_LOG_RATELIMIT(ERR, TIMER, "Cannot set CPS scan timer\n");
 		goto mailbox;
 	}
 
