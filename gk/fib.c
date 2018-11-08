@@ -23,6 +23,7 @@
 #include "gatekeeper_l2.h"
 #include "gatekeeper_lls.h"
 #include "gatekeeper_main.h"
+#include "gatekeeper_ratelimit.h"
 
 void
 destroy_neigh_hash_table(struct neighbor_hash_table *neigh)
@@ -68,7 +69,7 @@ clear_ether_cache(struct ether_cache *eth_cache)
 		offsetof(struct ether_cache, fields_to_clear));
 
 	if ((ref_cnt = rte_atomic32_read(&eth_cache->ref_cnt)) != 1) {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"gk: the value of ref_cnt field in Ethernet cache entry is %d rather than 1 while calling function %s!\n",
 			ref_cnt, __func__);
 	}
@@ -161,7 +162,7 @@ neigh_get_ether_cache_locked(struct neighbor_hash_table *neigh,
 		ret = hold_nd(gk_arp_and_nd_req_cb,
 			eth_cache, &addr->ip.v6, lcore_id);
 	} else {
-		RTE_LOG(CRIT, GATEKEEPER,
+		RTE_LOG_RATELIMIT(CRIT, GATEKEEPER,
 			"Unexpected condition at %s: unknown IP type %hu\n",
 			__func__, addr->proto);
 		ret = -1;
@@ -179,7 +180,7 @@ neigh_get_ether_cache_locked(struct neighbor_hash_table *neigh,
 		return eth_cache;
 	}
 
-	RTE_LOG(ERR, HASH,
+	RTE_LOG_RATELIMIT(ERR, HASH,
 		"Failed to add a cache entry to the neighbor hash table at %s\n",
 		__func__);
 
@@ -221,7 +222,7 @@ parse_ip_prefix(const char *ip_prefix, struct ipaddr *res)
 
 	ip_addr = strtok_r(ip_prefix_copy, "/", &saveptr);
 	if (ip_addr == NULL) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to parse IP address in IP prefix %s at %s\n",
 			ip_prefix, __func__);
 		return -1;
@@ -233,7 +234,7 @@ parse_ip_prefix(const char *ip_prefix, struct ipaddr *res)
 
 	prefix_len_str = strtok_r(NULL, "\0", &saveptr);
 	if (prefix_len_str == NULL) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to parse prefix length in IP prefix %s at %s\n",
 			ip_prefix, __func__);
 		return -1;
@@ -241,7 +242,7 @@ parse_ip_prefix(const char *ip_prefix, struct ipaddr *res)
 
 	prefix_len = strtol(prefix_len_str, &end, 10);
 	if (prefix_len_str == end || !*prefix_len_str || *end) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: prefix length \"%s\" is not a number\n",
 			prefix_len_str);
 		return -1;
@@ -249,21 +250,21 @@ parse_ip_prefix(const char *ip_prefix, struct ipaddr *res)
 
 	if ((prefix_len == LONG_MAX || prefix_len == LONG_MIN) &&
 			errno == ERANGE) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: prefix length \"%s\" caused underflow or overflow\n",
 			prefix_len_str);
 		return -1;
 	}
 
 	if (prefix_len < 0 || prefix_len > max_prefix_len(ip_type)) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: prefix length \"%s\" is out of range\n",
 			prefix_len_str);
 		return -1;
 	}
 
 	if (convert_str_to_ip(ip_addr, res) < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: the IP address part of the IP prefix %s is not valid\n",
 			ip_prefix);
 		return -1;
@@ -291,10 +292,10 @@ __get_empty_fib_id(struct gk_fib *fib_tbl,
 	}
 
 	if (fib_tbl == gk_conf->lpm_tbl.fib_tbl) {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"gk: cannot find an empty fib entry in the IPv4 FIB table!\n");
 	} else {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"gk: cannot find an empty fib entry in the IPv6 FIB table!\n");
 	}
 
@@ -407,7 +408,7 @@ setup_neighbor_tbl(unsigned int socket_id, int identifier,
 	neigh_hash_params.socket_id = socket_id;
 	neigh->hash_table = rte_hash_create(&neigh_hash_params);
 	if (neigh->hash_table == NULL) {
-		RTE_LOG(ERR, HASH,
+		RTE_LOG_RATELIMIT(ERR, HASH,
 			"The GK block cannot create hash table for neighbor FIB!\n");
 
 		ret = -1;
@@ -418,7 +419,7 @@ setup_neighbor_tbl(unsigned int socket_id, int identifier,
 	neigh->cache_tbl = rte_calloc(NULL,
 		ht_size, sizeof(struct ether_cache), 0);
 	if (neigh->cache_tbl == NULL) {
-		RTE_LOG(ERR, MALLOC,
+		RTE_LOG_RATELIMIT(ERR, MALLOC,
 			"The GK block cannot create Ethernet header cache table\n");
 
 		ret = -1;
@@ -586,7 +587,7 @@ init_fib_tbl(struct gk_config *gk_conf)
 	ret = setup_net_prefix_fib(0, &neigh_fib_front,
 		&neigh6_fib_front, &gk_conf->net->front, gk_conf);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to setup the FIB entry for the front network prefixes at %s\n",
 			__func__);
 		goto out;
@@ -597,7 +598,7 @@ init_fib_tbl(struct gk_config *gk_conf)
 	ret = setup_net_prefix_fib(1, &neigh_fib_back,
 		&neigh6_fib_back, &gk_conf->net->back, gk_conf);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to setup the FIB entry for the back network prefixes at %s\n",
 			__func__);
 		goto free_front_fibs;
@@ -648,7 +649,7 @@ setup_gk_lpm(struct gk_config *gk_conf, unsigned int socket_id)
 		ltbl->lpm = init_ipv4_lpm(
 			"gk", &ipv4_lpm_config, socket_id, 0, 0);
 		if (ltbl->lpm == NULL) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"gk: failed to initialize the IPv4 LPM table at %s\n",
 				__func__);
 			ret = -1;
@@ -659,7 +660,7 @@ setup_gk_lpm(struct gk_config *gk_conf, unsigned int socket_id)
 			gk_conf->gk_max_num_ipv4_fib_entries,
 			sizeof(struct gk_fib), 0);
 		if (ltbl->fib_tbl == NULL) {
-			RTE_LOG(ERR, MALLOC,
+			RTE_LOG_RATELIMIT(ERR, MALLOC,
 				"gk: failed to allocate the IPv4 FIB table at %s\n",
 				__func__);
 			ret = -1;
@@ -679,7 +680,7 @@ setup_gk_lpm(struct gk_config *gk_conf, unsigned int socket_id)
 		ltbl->lpm6 = init_ipv6_lpm(
 			"gk", &ipv6_lpm_config, socket_id, 0, 0);
 		if (ltbl->lpm6 == NULL) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"gk: failed to initialize the IPv6 LPM table at %s\n",
 				__func__);
 			ret = -1;
@@ -690,7 +691,7 @@ setup_gk_lpm(struct gk_config *gk_conf, unsigned int socket_id)
 			gk_conf->gk_max_num_ipv6_fib_entries,
 			sizeof(struct gk_fib), 0);
 		if (ltbl->fib_tbl6 == NULL) {
-			RTE_LOG(ERR, MALLOC,
+			RTE_LOG_RATELIMIT(ERR, MALLOC,
 				"gk: failed to allocate the IPv6 FIB table at %s\n",
 				__func__);
 			ret = -1;
@@ -700,7 +701,7 @@ setup_gk_lpm(struct gk_config *gk_conf, unsigned int socket_id)
 
 	ret = init_fib_tbl(gk_conf);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to initialize the FIB table at %s\n",
 			__func__);
 		goto free_lpm_tbl6;
@@ -742,7 +743,7 @@ notify_gk_instance(struct gk_fib *fib, struct gk_instance *instance)
 	struct mailbox *mb = &instance->mb;
 	struct gk_cmd_entry *entry = mb_alloc_entry(mb);
 	if (entry == NULL) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to allocate a `struct gk_cmd_entry` entry at %s\n",
 			__func__);
 		return -1;
@@ -753,7 +754,7 @@ notify_gk_instance(struct gk_fib *fib, struct gk_instance *instance)
 
 	ret = mb_send_entry(mb, entry);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to send a `struct gk_cmd_entry` entry at %s\n",
 			__func__);
 		return -1;
@@ -801,7 +802,7 @@ synchronize_gk_instances(struct gk_fib *fib, struct gk_config *gk_conf)
 finish_notify:
 
 	if (num_succ_notified_inst != gk_conf->num_lcores) {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"gk: %s successfully notifies only %d/%d instances\n",
 			__func__, num_succ_notified_inst, gk_conf->num_lcores);
 	}
@@ -833,12 +834,12 @@ remove_prefix_from_lpm_locked(
 			ltbl->lpm, ntohl(ip_prefix->addr.ip.v4.s_addr),
 			ip_prefix->len, &fib_id);
 		if (ip_prefix_present == 0) {
-			RTE_LOG(WARNING, GATEKEEPER,
+			RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 				"gk: delete an non-existent IP prefix (%s)\n",
 				ip_prefix->str);
 			return NULL;
 		} else if (ip_prefix_present < 0) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"gk: failed to call rte_lpm_is_rule_present() for IP prefix (%s)\n",
 				ip_prefix->str);
 			return NULL;
@@ -852,12 +853,12 @@ remove_prefix_from_lpm_locked(
 			ltbl->lpm6, ip_prefix->addr.ip.v6.s6_addr,
 			ip_prefix->len, &fib_id);
 		if (ip_prefix_present == 0) {
-			RTE_LOG(WARNING, GATEKEEPER,
+			RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 				"gk: delete an non-existent IP prefix (%s)\n",
 				ip_prefix->str);
 			return NULL;
 		} else if (ip_prefix_present < 0) {
-			RTE_LOG(ERR, GATEKEEPER,
+			RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 				"gk: failed to call rte_lpm6_is_rule_present() for IP prefix (%s)\n",
 				ip_prefix->str);
 			return NULL;
@@ -865,7 +866,7 @@ remove_prefix_from_lpm_locked(
 
 		ip_prefix_fib = &ltbl->fib_tbl6[fib_id];
 	} else {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"gk: delete an IP prefix (%s) with unknown IP type %hu\n",
 			ip_prefix->str, ip_prefix->addr.proto);
 		return NULL;
@@ -873,7 +874,7 @@ remove_prefix_from_lpm_locked(
 
 	ret = lpm_del_route(&ip_prefix->addr, ip_prefix->len, ltbl);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: cannot remove the IP prefix %s from LPM table\n",
 			ip_prefix->str);
 		return NULL;
@@ -900,7 +901,7 @@ find_fib_entry_for_neighbor_locked(struct ipaddr *gw_addr,
 	else if (likely(action == GK_FWD_GATEWAY_BACK_NET))
 		iface = &gk_conf->net->back;
 	else {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to delete a Gateway ethernet cache entry from neighbor hash table, since it has invalid action %d.\n",
 			action);
 		return NULL;
@@ -929,7 +930,7 @@ find_fib_entry_for_neighbor_locked(struct ipaddr *gw_addr,
 
 		neigh_fib = &ltbl->fib_tbl6[fib_id];
 	} else {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: unconfigued IP type %hu at interface %s!\n",
 			gw_addr->proto, iface->name);
 		return NULL;
@@ -999,7 +1000,7 @@ ether_cache_put(struct gk_fib *neigh_fib,
 		ret = rte_hash_del_key(neighbor_fib->u.neigh.hash_table,
 			&addr.ip.v4.s_addr);
 		if (ret < 0) {
-			RTE_LOG(CRIT, GATEKEEPER,
+			RTE_LOG_RATELIMIT(CRIT, GATEKEEPER,
 				"gk: failed to delete an Ethernet cache entry from the IPv4 neighbor table at %s, we are not trying to recover from this failure!\n",
 				__func__);
 		}
@@ -1015,14 +1016,14 @@ ether_cache_put(struct gk_fib *neigh_fib,
 		ret = rte_hash_del_key(neighbor_fib->u.neigh6.hash_table,
 			addr.ip.v6.s6_addr);
 		if (ret < 0) {
-			RTE_LOG(CRIT, GATEKEEPER,
+			RTE_LOG_RATELIMIT(CRIT, GATEKEEPER,
 				"gk: failed to delete an Ethernet cache entry from the IPv6 neighbor table at %s, we are not trying to recover from this failure!\n",
 				__func__);
 		}
 		return ret;
 	}
 
-	RTE_LOG(ERR, GATEKEEPER,
+	RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 		"gk: remove an invalid FIB entry with IP type %hu at %s\n",
 		addr.proto, __func__);
 
@@ -1041,7 +1042,7 @@ del_gateway_from_neigh_table_locked(
 {
 	int ret = ether_cache_put(NULL, action, eth_cache, gk_conf);
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to release the Ethernet cached header of the Grantor FIB entry for the IP prefix %s at %s\n",
 			ip_prefix->str, __func__);
 		return -1;
@@ -1107,7 +1108,7 @@ del_fib_entry_locked(struct ip_prefix *ip_prefix, struct gk_config *gk_conf)
 	case GK_FWD_NEIGHBOR_FRONT_NET:
 		/* FALLTHROUGH */
 	case GK_FWD_NEIGHBOR_BACK_NET:
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"gk: %s received a request to delete FIB entry %s with prefix action %u; Gatekeeper may need to restart\n",
 			__func__, ip_prefix->str, ip_prefix_fib->action);
 		ret = -1;
@@ -1144,7 +1145,7 @@ init_gateway_fib_locked(struct ip_prefix *ip_prefix, enum gk_fib_action action,
 	struct gatekeeper_if *iface;
 
 	if (gw_addr->proto != ip_prefix->addr.proto) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to initialize a fib entry for gateway, since the gateway and its responsible IP prefix have different IP versions.\n");
 		return NULL;
 	}
@@ -1154,7 +1155,7 @@ init_gateway_fib_locked(struct ip_prefix *ip_prefix, enum gk_fib_action action,
 	else if (likely(action == GK_FWD_GATEWAY_BACK_NET))
 		iface = &gk_conf->net->back;
 	else {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to initialize a fib entry for gateway, since it has invalid action %d.\n",
 			action);
 		return NULL;
@@ -1216,13 +1217,13 @@ init_grantor_fib_locked(
 	struct gk_fib *neigh_fib;
 
 	if (gt_addr->proto != ip_prefix->addr.proto) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to initialize a fib entry for grantor, since the grantor and its responsible IP prefix have different IP versions.\n");
 		return NULL;
 	}
 
 	if (gw_addr->proto != ip_prefix->addr.proto) {
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"gk: failed to initialize a fib entry for grantor, since the gateway and its responsible IP prefix have different IP versions.\n");
 		return NULL;
 	}
@@ -1355,7 +1356,7 @@ add_fib_entry_locked(struct ip_prefix *prefix,
 	case GK_FWD_NEIGHBOR_BACK_NET:
 		/* FALLTHROUGH */
 	default:
-		RTE_LOG(ERR, GATEKEEPER,
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 			"Invalid fib action %u at %s\n", action, __func__);
 		return -1;
 		break;
@@ -1430,7 +1431,7 @@ check_prefix_locked(struct ip_prefix *prefix,
 				ntohl(prefix->addr.ip.v4.s_addr),
 				prefix->len, &state);
 			if (ret < 0) {
-				RTE_LOG(ERR, GATEKEEPER,
+				RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 					"gk: failed to initialize the lpm rule iterator state at %s!\n",
 					__func__);
 				return -1;
@@ -1442,7 +1443,7 @@ check_prefix_locked(struct ip_prefix *prefix,
 				if (ip_prefix_fib->action != GK_FWD_GRANTOR &&
 						ip_prefix_fib->action !=
 						GK_DROP) {
-					RTE_LOG(WARNING, GATEKEEPER,
+					RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 						"gk: adding this rule with prefix %s and action %u would add a security hole since there already exists an entry of %u length with action %u\n",
 						prefix->str, action, state.depth,
 						ip_prefix_fib->action);
@@ -1457,7 +1458,7 @@ check_prefix_locked(struct ip_prefix *prefix,
 				prefix->addr.ip.v6.s6_addr,
 				prefix->len, &state);
 			if (ret < 0) {
-				RTE_LOG(ERR, GATEKEEPER,
+				RTE_LOG_RATELIMIT(ERR, GATEKEEPER,
 					"gk: failed to initialize the lpm6 rule iterator state at %s!\n",
 					__func__);
 				return -1;
@@ -1469,7 +1470,7 @@ check_prefix_locked(struct ip_prefix *prefix,
 				if (ip_prefix_fib->action != GK_FWD_GRANTOR &&
 						ip_prefix_fib->action !=
 						GK_DROP) {
-					RTE_LOG(WARNING, GATEKEEPER,
+					RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 						"gk: adding this rule with prefix %s and action %u would add a security hole since there already exists an entry of %u length with action %u\n",
 						prefix->str, action, re.depth,
 						ip_prefix_fib->action);
@@ -1478,7 +1479,7 @@ check_prefix_locked(struct ip_prefix *prefix,
 				ret = rte_lpm6_rule_iterate(&state, &re);
 			}
 		} else {
-			RTE_LOG(WARNING, GATEKEEPER,
+			RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 				"gk: unknown IP type %hu with prefix %s and action %u\n",
 				prefix->addr.proto, prefix->str, action);
 			return -1;
@@ -1501,7 +1502,7 @@ check_prefix_locked(struct ip_prefix *prefix,
 			ip_prefix_fib = &ltbl->fib_tbl[fib_id];
 			if (ip_prefix_fib->action == GK_FWD_GRANTOR ||
 					ip_prefix_fib->action == GK_DROP) {
-				RTE_LOG(WARNING, GATEKEEPER,
+				RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 					"gk: adding this rule with prefix %s and action %u would add a security hole since there already exists an entry of %u length with action %u\n",
 					prefix->str, action, i, ip_prefix_fib->action);
 				return -1;
@@ -1519,14 +1520,14 @@ check_prefix_locked(struct ip_prefix *prefix,
 			ip_prefix_fib = &ltbl->fib_tbl6[fib_id];
 			if (ip_prefix_fib->action == GK_FWD_GRANTOR ||
 					ip_prefix_fib->action == GK_DROP) {
-				RTE_LOG(WARNING, GATEKEEPER,
+				RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 					"gk: adding this rule with prefix %s and action %u would add a security hole since there already exists an entry of %u length with action %u\n",
 					prefix->str, action, i, ip_prefix_fib->action);
 				return -1;
 			}
 		}
 	} else {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"gk: unknown IP type %hu with prefix %s and action %u\n",
 			prefix->addr.proto, prefix->str, action);
 		return -1;
@@ -1547,7 +1548,7 @@ add_fib_entry_numerical(struct ip_prefix *prefix_info,
 		return -1;
 
 	if (prefix_info->len == 0) {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"gk: Gatekeeper currently doesn't support default routes when it receives the prefix %s with length zero at %s!\n",
 			prefix_info->str, __func__);
 		return -1;
@@ -1641,7 +1642,7 @@ del_fib_entry_numerical(
 		return -1;
 
 	if (prefix_info->len == 0) {
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"gk: Gatekeeper currently doesn't support default routes when it receives the prefix %s with length zero at %s!\n",
 			prefix_info->str, __func__);
 		return -1;
