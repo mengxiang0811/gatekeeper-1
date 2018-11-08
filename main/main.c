@@ -83,7 +83,7 @@ time_resolution_init(void)
 	cycles_per_ms = cycles_per_sec / 1000UL;
 	picosec_per_cycle = 1000UL * diff_ns / cycles;
 
-	RTE_LOG(NOTICE, TIMER,
+	RTE_LOG_RATELIMIT(NOTICE, TIMER,
 		"cycles/second = %" PRIu64 ", cycles/millisecond = %" PRIu64 ", picosec/cycle = %" PRIu64 "!\n",
 		cycles_per_sec, cycles_per_ms, picosec_per_cycle);
 
@@ -170,7 +170,7 @@ main(int argc, char **argv)
 
 	ret = config_gatekeeper();
 	if (ret < 0) {
-		RTE_LOG(ERR, GATEKEEPER, "Failed to configure Gatekeeper!\n");
+		RTE_LOG_RATELIMIT(ERR, GATEKEEPER, "Failed to configure Gatekeeper!\n");
 		goto net;
 	}
 
