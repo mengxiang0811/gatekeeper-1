@@ -18,6 +18,7 @@
 
 #include "gatekeeper_l2.h"
 #include "gatekeeper_main.h"
+#include "gatekeeper_ratelimit.h"
 
 /*
  * Return the difference in the size of the L2 header between
@@ -58,7 +59,7 @@ adjust_pkt_len(struct rte_mbuf *pkt, struct gatekeeper_if *iface,
 		eth_hdr = (struct ether_hdr *)rte_pktmbuf_prepend(pkt,
 			bytes_to_add);
 		if (eth_hdr == NULL) {
-			RTE_LOG(ERR, MBUF,
+			RTE_LOG_RATELIMIT(ERR, MBUF,
 				"Not enough headroom space in the first segment!\n");
 			return NULL;
 		}
@@ -70,7 +71,7 @@ adjust_pkt_len(struct rte_mbuf *pkt, struct gatekeeper_if *iface,
 		eth_hdr = (struct ether_hdr *)rte_pktmbuf_adj(pkt,
 			-bytes_to_add);
 		if (eth_hdr == NULL) {
-			RTE_LOG(ERR, MBUF,
+			RTE_LOG_RATELIMIT(ERR, MBUF,
 				"Could not remove headroom space!\n");
 			return NULL;
 		}
@@ -96,7 +97,7 @@ verify_l2_hdr(struct gatekeeper_if *iface, struct ether_hdr *eth_hdr,
 		 * we would have to make space for a new header.
 		 */
 		if (unlikely(l2_type != RTE_PTYPE_L2_ETHER_VLAN)) {
-			RTE_LOG(WARNING, GATEKEEPER,
+			RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 				"lls: %s interface incorrectly received an %s packet without a VLAN header\n",
 				iface->name, proto_name);
 			return -1;
@@ -108,7 +109,7 @@ verify_l2_hdr(struct gatekeeper_if *iface, struct ether_hdr *eth_hdr,
 		 */
 		vlan_hdr = (struct vlan_hdr *)&eth_hdr[1];
 		if (unlikely(vlan_hdr->vlan_tci != iface->vlan_tag_be)) {
-			RTE_LOG(WARNING, GATEKEEPER,
+			RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 				"lls: %s interface received an %s packet with an incorrect VLAN tag (0x%02x but should be 0x%02x)\n",
 				iface->name, proto_name,
 				rte_be_to_cpu_16(vlan_hdr->vlan_tci),
@@ -120,7 +121,7 @@ verify_l2_hdr(struct gatekeeper_if *iface, struct ether_hdr *eth_hdr,
 		 * Drop packets that have a VLAN header when we're not expecting
 		 * one, since we would have to remove space in the header.
 		 */
-		RTE_LOG(WARNING, GATEKEEPER,
+		RTE_LOG_RATELIMIT(WARNING, GATEKEEPER,
 			"lls: %s interface incorrectly received an %s packet with a VLAN header\n",
 			iface->name, proto_name);
 		return -1;
