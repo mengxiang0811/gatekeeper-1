@@ -27,6 +27,7 @@
 #include "gatekeeper_launch.h"
 #include "list.h"
 #include "gatekeeper_main.h"
+#include "gatekeeper_ratelimit.h"
 
 static struct launch_heads {
 	struct list_head stage1;
@@ -51,7 +52,7 @@ launch_at_stage1(lcore_function_t *f, void *arg)
 
 	entry = rte_malloc(__func__, sizeof(*entry), 0);
 	if (entry == NULL) {
-		RTE_LOG(ERR, MALLOC, "%s: DPDK ran out of memory", __func__);
+		RTE_LOG_RATELIMIT(ERR, MALLOC, "%s: DPDK ran out of memory", __func__);
 		return -1;
 	}
 
@@ -103,7 +104,7 @@ launch_at_stage2(lcore_function_t *f, void *arg)
 
 	entry = rte_malloc(__func__, sizeof(*entry), 0);
 	if (entry == NULL) {
-		RTE_LOG(ERR, MALLOC, "%s: DPDK ran out of memory", __func__);
+		RTE_LOG_RATELIMIT(ERR, MALLOC, "%s: DPDK ran out of memory", __func__);
 		return -1;
 	}
 
@@ -173,7 +174,7 @@ launch_at_stage3(const char *name, lcore_function_t *f, void *arg,
 
 	entry = rte_malloc(__func__, sizeof(*entry), 0);
 	if (entry == NULL) {
-		RTE_LOG(ERR, MALLOC, "%s: DPDK ran out of memory", __func__);
+		RTE_LOG_RATELIMIT(ERR, MALLOC, "%s: DPDK ran out of memory", __func__);
 		goto name_cpy;
 	}
 
@@ -224,7 +225,7 @@ launch_stage3(void)
 		ret = rte_eal_remote_launch(entry->f, entry->arg,
 			entry->lcore_id);
 		if (ret != 0) {
-			RTE_LOG(ERR, EAL, "lcore %u failed to launch %s\n",
+			RTE_LOG_RATELIMIT(ERR, EAL, "lcore %u failed to launch %s\n",
 				entry->lcore_id, entry->name);
 			return ret;
 		}
