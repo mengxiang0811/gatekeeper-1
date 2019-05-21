@@ -40,11 +40,14 @@
 #include "gatekeeper_launch.h"
 
 static struct net_config config;
-/*
- * The secret key of the RSS hash (RSK) must be random in order
- * to prevent hackers from knowing it.
- */
-uint8_t default_rss_key[GATEKEEPER_RSS_KEY_LEN];
+
+uint8_t default_rss_key[GATEKEEPER_RSS_KEY_LEN] = {
+	0x6d, 0x5a, 0x56, 0xda, 0x25, 0x5b, 0x0e, 0xc2,
+	0x41, 0x67, 0x25, 0x3d, 0x43, 0xa3, 0x8f, 0xb0,
+	0xd0, 0xca, 0x2b, 0xcb, 0xae, 0x7b, 0x30, 0xb4,
+	0x77, 0xcb, 0x2d, 0xa3, 0x80, 0x30, 0xf2, 0x0c,
+	0x6a, 0x42, 0xb7, 0x3b, 0xbe, 0xac, 0x01, 0xfa,
+};
 
 static int
 randomize_rss_key(int guarantee_random_entropy)
@@ -61,6 +64,8 @@ randomize_rss_key(int guarantee_random_entropy)
 	 */
 	const uint16_t min_num_set_bits = sizeof(default_rss_key) * 8 * 0.1;
 	const uint16_t max_num_set_bits = sizeof(default_rss_key) * 8 * 0.9;
+
+	return 0;
 
 	do {	
 		int number_of_bytes = 0;
