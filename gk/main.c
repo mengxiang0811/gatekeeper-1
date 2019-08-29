@@ -2030,6 +2030,40 @@ gk_proc(void *arg)
 
 	gk_conf_hold(gk_conf);
 
+#if 0
+	int i = 0;
+	while (i < 256) {
+		struct ipacket packet;
+		packet.flow.proto = RTE_ETHER_TYPE_IPV4;
+		packet.flow.f.v4.src.s_addr = rte_cpu_to_be_32(0x0a000100 | i);
+		packet.flow.f.v4.dst.s_addr = rte_cpu_to_be_32(0x0a000322);
+		uint32_t rss_hash_val;
+		uint32_t idx;
+		uint32_t shift;
+		uint16_t queue_id;
+		int block_idx;
+		rss_hash_val = rss_ip_flow_hf(&packet.flow, 0, 0) %
+			gk_conf->rss_conf_front.reta_size;
+
+		/*
+		 * Identify which GK block is responsible for the
+		 * pair <Src, Dst> in the decision.
+		 */
+		idx = rss_hash_val / RTE_RETA_GROUP_SIZE;
+		shift = rss_hash_val % RTE_RETA_GROUP_SIZE;
+		queue_id = gk_conf->rss_conf_front.reta_conf[idx].reta[shift];
+		block_idx = gk_conf->queue_id_to_instance[queue_id];
+
+		printf("address: %08x:%08x; software: %u (%u)\n",
+			packet.flow.f.v4.src.s_addr,
+			packet.flow.f.v4.dst.s_addr,
+			rss_ip_flow_hf(&packet.flow, 0, 0),
+			block_idx);
+
+		i++;
+	}
+#endif
+
 	while (likely(!exiting)) {
 		front_num_pkts = 0;
 		back_num_pkts = 0;
