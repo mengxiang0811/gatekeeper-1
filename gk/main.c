@@ -412,7 +412,7 @@ gk_process_declined(struct flow_entry *fe, struct ipacket *packet,
 {
 	uint64_t now = rte_rdtsc();
 
-	if (unlikely(now >= fe->u.declined.expire_at)) {
+	if (false && unlikely(now >= fe->u.declined.expire_at)) {
 		reinitialize_flow_entry(fe, now);
 		return gk_process_request(fe, packet, sol_conf, stats);
 	}
@@ -1524,7 +1524,6 @@ lookup_fe_from_lpm(struct ipacket *packet, uint32_t ip_flow_hash_val,
 			 * flow a chance sending a
 			 * request to the grantor
 			 * server.
-			 */
 			struct flow_entry temp_fe;
 			initialize_flow_entry(&temp_fe,
 				&packet->flow, fib);
@@ -1535,6 +1534,10 @@ lookup_fe_from_lpm(struct ipacket *packet, uint32_t ip_flow_hash_val,
 				drop_packet_front(
 					pkt, instance);
 			}
+			 */
+			ret = gk_process_declined(NULL, packet,
+				gk_conf->sol_conf, stats);
+			drop_packet_front(pkt, instance);
 			return NULL;
 		} else if (ret < 0) {
 			drop_packet_front(pkt, instance);
@@ -1655,7 +1658,7 @@ process_flow_entry(struct flow_entry *fe, struct ipacket *packet,
 	 */
 	switch (fe->state) {
 	case GK_REQUEST:
-		ret = gk_process_request(fe, packet,
+		ret = gk_process_declined(fe, packet,
 			gk_conf->sol_conf, stats);
 		break;
 
