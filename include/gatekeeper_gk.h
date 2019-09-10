@@ -114,6 +114,10 @@ struct gk_instance {
 	/* Data structures used to limit the rate of icmp messages. */
 	struct token_bucket_ratelimit_state front_icmp_rs;
 	struct token_bucket_ratelimit_state back_icmp_rs;
+	bool     is_ht_full;
+	double   threshold;
+	/* Total size in bytes of packets received for threshold update. */
+	uint64_t tot_pkts_size_thresh;
 } __rte_cache_aligned;
 
 #define GK_MAX_BPF_FLOW_HANDLERS	(UINT8_MAX + 1)

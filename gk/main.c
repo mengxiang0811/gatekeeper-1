@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <math.h>
+#include <time.h>
 #include <linux/icmp.h>
 #include <linux/icmpv6.h>
 
@@ -1454,6 +1455,7 @@ process_pkts_front(uint16_t port_front, uint16_t port_back,
 		uint32_t ip_flow_hash_val;
 
 		stats->tot_pkts_size += rte_pktmbuf_pkt_len(pkt);
+		instance->tot_pkts_size_thresh += rte_pktmbuf_pkt_len(pkt);
 
 		ret = extract_packet_info(pkt, &packet);
 		if (ret < 0) {
@@ -1538,6 +1540,15 @@ process_pkts_front(uint16_t port_front, uint16_t port_back,
 				 * brand-new entry instructs, and
 			 	 * go to the next packet.
 			 	 */
+				if (instance->is_ht_full) {
+					double r = rand() / (double)RAND_MAX;
+					if (r < instance->threshold) {
+						drop_packet_front(pkt,
+							instance);
+						continue;
+					}
+				}
+
 				ret = gk_hash_add_flow_entry(
 					instance, &packet.flow,
 					ip_flow_hash_val, GK_REQUEST);
@@ -1559,6 +1570,7 @@ process_pkts_front(uint16_t port_front, uint16_t port_back,
 						drop_packet_front(
 							pkt, instance);
 					}
+					instance->is_ht_full = true;
 					continue;
 				} else if (ret < 0) {
 					drop_packet_front(pkt, instance);
@@ -1942,7 +1954,9 @@ gk_proc(void *arg)
 	int num_buckets = rte_hash_get_num_buckets(
 		instance->ip_flow_hash_table);
 	uint32_t bucket_idx = 0;
+	uint64_t target_rx_speed = 2ULL * 1024 * 1024 * 1024 / 8;
 	uint64_t last_scan_tsc = rte_rdtsc();
+	uint64_t last_thresh_update_tsc = last_scan_tsc;
 	uint64_t last_measure_tsc = last_scan_tsc;
 	uint64_t basic_measurement_logging_cycles =
 		gk_conf->basic_measurement_logging_ms *
@@ -1960,6 +1974,9 @@ gk_proc(void *arg)
 	GK_LOG(NOTICE, "The GK block is running at lcore = %u\n", lcore);
 
 	gk_conf_hold(gk_conf);
+
+	srand((long)time(NULL));
+	instance->is_ht_full = false;
 
 	while (likely(!exiting)) {
 		uint64_t now;
@@ -1989,6 +2006,30 @@ gk_proc(void *arg)
 			gk_flow_tbl_bucket_scan(&bucket_idx, instance);
 			last_scan_tsc = rte_rdtsc();
 			now = last_scan_tsc;
+			instance->is_ht_full = false;
+		}
+
+		if (now - last_thresh_update_tsc >= cycles_per_sec) {
+			if (instance->tot_pkts_size_thresh < target_rx_speed) {
+				double ratio = (target_rx_speed -
+					instance->tot_pkts_size_thresh) /
+					(double)target_rx_speed;
+
+				if (instance->threshold <= 0.001)
+					instance->threshold = ratio;
+				else
+					instance->threshold += ratio * (1.0 -
+						instance->threshold);
+
+				if (instance->threshold > 0.99)
+					instance->threshold = 0.99;
+			} else
+				instance->threshold = 0.0;
+
+			instance->tot_pkts_size_thresh = 0;
+
+			last_thresh_update_tsc = rte_rdtsc();
+			now = last_thresh_update_tsc;
 		}
 
 		if (now - last_measure_tsc >=
@@ -2012,6 +2053,8 @@ gk_proc(void *arg)
 				stats->tot_pkts_size_distributed);
 
 			memset(stats, 0, sizeof(*stats));
+
+			instance->is_ht_full = false;
 
 			last_measure_tsc = rte_rdtsc();
 		}
