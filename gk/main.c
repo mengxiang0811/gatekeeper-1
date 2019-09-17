@@ -49,6 +49,43 @@
 /* Set @START_ALLOWANCE as the double size of a large DNS reply. */
 #define	START_ALLOWANCE		 (8)
 
+struct grantedv2_state {
+	/* When @budget_byte is reset. */
+	uint64_t budget_renew_at;
+	/*
+	 * When @budget1_byte is reset,
+	 * add @tx1_rate_kib_cycle * 1024 bytes to it.
+	 */
+	uint32_t tx1_rate_kib_cycle;
+	/*
+	 * When @budget2_byte is reset,
+	 * reset it to @tx2_rate_kib_cycle * 1024 bytes.
+	 */
+	uint32_t tx2_rate_kib_cycle;
+	/* How many bytes @src can still send in current cycle. */
+	int64_t budget1_byte;
+	/*
+	 * How many bytes @src can still send in current cycle in
+	 * the secondary channel.
+	 */
+	int64_t budget2_byte;
+	/*
+	 * When GK should send the next renewal to
+	 * the corresponding grantor.
+	 */
+	uint64_t send_next_renewal_at;
+	/*
+	 * How many cycles (unit) GK must wait before
+	 * sending the next capability renewal request.
+	 */
+	uint64_t renewal_step_cycle;
+	/*
+	 * If true, do not encapsulate granted packets and send them directly
+	 * to their destinations whenever it is possible.
+	 */
+	bool direct_if_possible;
+};
+
 int gk_logtype;
 
 /* We should avoid calling integer_log_base_2() with zero. */
@@ -183,6 +220,10 @@ static inline void
 initialize_flow_entry(struct flow_entry *fe,
 	struct ip_flow *flow, struct gk_fib *grantor_fib)
 {
+	uint64_t now = rte_rdtsc();
+	struct grantedv2_state *state =
+		(struct grantedv2_state *)fe->u.bpf.cookie.mem;
+
 	/*
 	 * The flow table is a critical data structure, so,
 	 * whenever the size of entries grow too much,
@@ -190,14 +231,25 @@ initialize_flow_entry(struct flow_entry *fe,
 	 * the limit below.
 	 */
 	RTE_BUILD_BUG_ON(sizeof(*fe) > 128);
+	RTE_BUILD_BUG_ON(sizeof(*state) > sizeof(fe->u.bpf.cookie));
 
 	rte_memcpy(&fe->flow, flow, sizeof(*flow));
 
-	fe->state = GK_REQUEST;
-	fe->u.request.last_packet_seen_at = rte_rdtsc();
-	fe->u.request.last_priority = START_PRIORITY;
-	fe->u.request.allowance = START_ALLOWANCE - 1;
+	fe->state = GK_BPF;
+	fe->u.bpf.expire_at = now + 10000000000ULL;
+	/* BPF_INDEX_GRANTEDV2. */
+	fe->u.bpf.program_index = 2;
 	fe->grantor_fib = grantor_fib;
+
+	/* Copied from the dcs_friendly policy. */
+	state->budget_renew_at = now + cycles_per_sec;
+	state->tx1_rate_kib_cycle = 2048;
+	state->tx2_rate_kib_cycle = 2048 * 0.05;
+	state->budget1_byte = (int64_t)state->tx1_rate_kib_cycle * 1024;
+	state->budget2_byte = (int64_t)state->tx2_rate_kib_cycle * 1024;
+	state->send_next_renewal_at = now + 540000 * cycles_per_ms;
+	state->renewal_step_cycle = 3000 * cycles_per_ms;
+	state->direct_if_possible = false;
 }
 
 static inline void
@@ -1416,7 +1468,6 @@ update_ip_hop_count(struct gatekeeper_if *iface, struct ipacket *packet,
 /*
  * This function is only to be called on flows that
  * are not backed by a flow entry.
- */
 static void
 send_request_to_grantor(struct ipacket *packet, struct gk_fib *fib,
 		struct gk_instance *instance, struct gk_config *gk_conf) {
@@ -1430,6 +1481,7 @@ send_request_to_grantor(struct ipacket *packet, struct gk_fib *fib,
 	if (ret < 0)
 		drop_packet_front(packet->pkt, instance);
 }
+ */
 
 static struct flow_entry *
 lookup_fe_from_lpm(struct ipacket *packet, uint32_t ip_flow_hash_val,
@@ -1437,7 +1489,8 @@ lookup_fe_from_lpm(struct ipacket *packet, uint32_t ip_flow_hash_val,
 		struct acl_search *acl4, struct acl_search *acl6,
 		uint16_t *num_pkts, struct rte_mbuf **icmp_bufs,
 		struct gatekeeper_if *front, struct gatekeeper_if *back,
-		struct gk_instance *instance, struct gk_config *gk_conf) {
+		struct gk_instance *instance,
+		__attribute__((unused)) struct gk_config *gk_conf) {
 	struct rte_mbuf *pkt = packet->pkt;
 	struct ether_cache *eth_cache;
 	struct gk_measurement_metrics *stats = &instance->traffic_stats;
@@ -1479,8 +1532,11 @@ lookup_fe_from_lpm(struct ipacket *packet, uint32_t ip_flow_hash_val,
 		 * server.
 		 */
 		if (instance->has_insertion_failed) {
+			/*
 			send_request_to_grantor(packet, fib,
 				instance, gk_conf);
+			*/
+			drop_packet_front(packet->pkt, instance);
 			return NULL;
 		}
 
@@ -1506,9 +1562,10 @@ lookup_fe_from_lpm(struct ipacket *packet, uint32_t ip_flow_hash_val,
 			 * flow a chance sending a
 			 * request to the grantor
 			 * server.
-			 */
 			send_request_to_grantor(packet, fib,
 				instance, gk_conf);
+			 */
+			drop_packet_front(packet->pkt, instance);
 			instance->has_insertion_failed = true;
 			return NULL;
 		}
