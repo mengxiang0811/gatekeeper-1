@@ -410,7 +410,7 @@ gk_process_declined(struct flow_entry *fe, struct ipacket *packet,
 {
 	uint64_t now = rte_rdtsc();
 
-	if (unlikely(now >= fe->u.declined.expire_at)) {
+	if (false && unlikely(now >= fe->u.declined.expire_at)) {
 		reinitialize_flow_entry(fe, now);
 		return gk_process_request(fe, packet, sol_conf, stats);
 	}
@@ -1416,7 +1416,6 @@ update_ip_hop_count(struct gatekeeper_if *iface, struct ipacket *packet,
 /*
  * This function is only to be called on flows that
  * are not backed by a flow entry.
- */
 static void
 send_request_to_grantor(struct ipacket *packet, struct gk_fib *fib,
 		struct gk_instance *instance, struct gk_config *gk_conf) {
@@ -1430,6 +1429,7 @@ send_request_to_grantor(struct ipacket *packet, struct gk_fib *fib,
 	if (ret < 0)
 		drop_packet_front(packet->pkt, instance);
 }
+ */
 
 static struct flow_entry *
 lookup_fe_from_lpm(struct ipacket *packet, uint32_t ip_flow_hash_val,
@@ -1479,8 +1479,13 @@ lookup_fe_from_lpm(struct ipacket *packet, uint32_t ip_flow_hash_val,
 		 * server.
 		 */
 		if (instance->has_insertion_failed) {
+			/*
 			send_request_to_grantor(packet, fib,
 				instance, gk_conf);
+			*/
+			ret = gk_process_declined(NULL, packet,
+				gk_conf->sol_conf, stats);
+			drop_packet_front(pkt, instance);
 			return NULL;
 		}
 
@@ -1506,10 +1511,13 @@ lookup_fe_from_lpm(struct ipacket *packet, uint32_t ip_flow_hash_val,
 			 * flow a chance sending a
 			 * request to the grantor
 			 * server.
-			 */
 			send_request_to_grantor(packet, fib,
 				instance, gk_conf);
+			 */
 			instance->has_insertion_failed = true;
+			ret = gk_process_declined(NULL, packet,
+				gk_conf->sol_conf, stats);
+			drop_packet_front(pkt, instance);
 			return NULL;
 		}
 		if (ret < 0) {
@@ -1631,7 +1639,7 @@ process_flow_entry(struct flow_entry *fe, struct ipacket *packet,
 	 */
 	switch (fe->state) {
 	case GK_REQUEST:
-		ret = gk_process_request(fe, packet,
+		ret = gk_process_declined(fe, packet,
 			gk_conf->sol_conf, stats);
 		break;
 
