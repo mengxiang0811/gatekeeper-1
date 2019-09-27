@@ -654,11 +654,23 @@ setup_gk_instance(unsigned int lcore_id, struct gk_config *gk_conf)
 		goto acl4_search;
 	}
 
+	instance->num_policies = 0;
+	instance->policies = rte_calloc(NULL,
+		gk_conf->mailbox_burst_size, sizeof(struct ggu_policy), 0);
+	if (instance->policies == NULL) {
+		GK_LOG(ERR,
+			"The GK block can't create GK policies at lcore %u\n",
+			lcore_id);
+
+		ret = -1;
+		goto acl6_search;
+	}
+
 	ret = init_mailbox("gk", gk_conf->mailbox_max_entries_exp,
 		sizeof(struct gk_cmd_entry), gk_conf->mailbox_mem_cache_size,
 		lcore_id, &instance->mb);
     	if (ret < 0)
-		goto acl6_search;
+		goto policies;
 
 	tb_ratelimit_state_init(&instance->front_icmp_rs,
 		gk_conf->front_icmp_msgs_per_sec,
@@ -670,6 +682,9 @@ setup_gk_instance(unsigned int lcore_id, struct gk_config *gk_conf)
 	ret = 0;
 	goto out;
 
+policies:
+	rte_free(instance->policies);
+	instance->policies = NULL;
 acl6_search:
 	destroy_acl_search(instance->acl6);
 	instance->acl6 = NULL;
@@ -716,16 +731,12 @@ gk_hash_add_flow_entry(struct gk_instance *instance,
  * instead it only initializes the @flow and @grantor_fib fields.
  */
 static struct flow_entry *
-add_new_flow_from_policy(
-	struct ggu_policy *policy, struct gk_instance *instance,
-	struct gk_config *gk_conf, uint32_t rss_hash_val)
+add_new_flow_from_policy(struct gk_fib *fib, struct ggu_policy *policy,
+	struct gk_instance *instance, uint32_t rss_hash_val)
 {
 	int ret;
-	struct gk_fib *fib;
 	struct flow_entry *fe;
-	struct gk_lpm *ltbl = &gk_conf->lpm_tbl;
 
-	fib = look_up_fib(ltbl, &policy->flow);
 	if (fib == NULL || fib->action != GK_FWD_GRANTOR) {
 		/*
 		 * Drop this solicitation to add
@@ -749,74 +760,6 @@ add_new_flow_from_policy(
 	fe->grantor_fib = fib;
 
 	return fe;
-}
-
-static void
-add_ggu_policy(struct ggu_policy *policy,
-	struct gk_instance *instance, struct gk_config *gk_conf)
-{
-	int ret;
-	uint64_t now = rte_rdtsc();
-	struct flow_entry *fe;
-	uint32_t rss_hash_val = policy->flow_hash_val;
-
-	/*
-	 * When the flow entry already exists,
-	 * the grantor ID should be already known.
-	 * Otherwise, Grantor ID comes from LPM lookup.
-	 */
-	ret = rte_hash_lookup_with_hash(instance->ip_flow_hash_table,
-		&policy->flow, rss_hash_val);
-	if (ret < 0) {
-		/*
-	 	 * The function add_ggu_policy() only fills up
-		 * GK_GRANTED and GK_DECLINED states. So, it doesn't
-		 * need to call initialize_flow_entry().
-		 */
-		fe = add_new_flow_from_policy(
-			policy, instance, gk_conf, rss_hash_val);
-		if (fe == NULL)
-			return;
-	} else
-		fe = &instance->ip_flow_entry_table[ret];
-
-	switch (policy->state) {
-	case GK_GRANTED:
-		fe->state = GK_GRANTED;
-		fe->u.granted.cap_expire_at = now +
-			policy->params.granted.cap_expire_sec *
-			cycles_per_sec;
-		fe->u.granted.tx_rate_kib_cycle =
-			policy->params.granted.tx_rate_kib_sec;
-		fe->u.granted.send_next_renewal_at = now +
-			policy->params.granted.next_renewal_ms *
-			cycles_per_ms;
-		fe->u.granted.renewal_step_cycle =
-			policy->params.granted.renewal_step_ms *
-			cycles_per_ms;
-		fe->u.granted.budget_renew_at = now + cycles_per_sec;
-		fe->u.granted.budget_byte =
-			(uint64_t)fe->u.granted.tx_rate_kib_cycle * 1024;
-		break;
-
-	case GK_DECLINED:
-		fe->state = GK_DECLINED;
-		fe->u.declined.expire_at = now +
-			policy->params.declined.expire_sec * cycles_per_sec;
-		break;
-
-	case GK_BPF:
-		fe->state = GK_BPF;
-		fe->u.bpf.expire_at = now +
-			policy->params.bpf.expire_sec * cycles_per_sec;
-		fe->u.bpf.program_index = policy->params.bpf.program_index;
-		fe->u.bpf.cookie = policy->params.bpf.cookie;
-		break;
-
-	default:
-		GK_LOG(ERR, "Unknown flow state %u\n", policy->state);
-		break;
-	}
 }
 
 static void
@@ -1074,12 +1017,14 @@ gk_synchronize(struct gk_fib *fib, struct gk_instance *instance)
 }
 
 static void
-process_gk_cmd(struct gk_cmd_entry *entry,
-	struct gk_instance *instance, struct gk_config *gk_conf)
+process_gk_cmd(struct gk_cmd_entry *entry, struct gk_instance *instance)
 {
 	switch (entry->op) {
 	case GK_ADD_POLICY_DECISION:
-		add_ggu_policy(&entry->u.ggu, instance, gk_conf);
+		if (!instance->has_insertion_failed) {
+			instance->policies[instance->num_policies++] =
+				&entry->u.ggu;
+		}
 		break;
 
 	case GK_SYNCH_WITH_LPM:
@@ -2099,6 +2044,147 @@ process_pkts_back(uint16_t port_back, uint16_t port_front,
 }
 
 static void
+add_ggu_policy_bulk(struct gk_instance *instance, struct gk_config *gk_conf)
+{
+	int i;
+	int ret;
+	uint64_t now = rte_rdtsc();
+	int num_policies = instance->num_policies;
+	struct ggu_policy **policies = instance->policies;
+	uint32_t flow_hash_val_arr[num_policies];
+	int done_lookups;
+	int32_t pos_arr[num_policies];
+	int num_lpm_lookups = 0;
+	int num_lpm6_lookups = 0;
+	int32_t lpm_lookup_pos[num_policies];
+	int32_t lpm6_lookup_pos[num_policies];
+	struct ip_flow *flow_arr[num_policies];
+	struct ip_flow *flows[num_policies];
+	struct ip_flow *flows6[num_policies];
+	struct gk_fib *fibs[num_policies];
+	struct gk_fib *fibs6[num_policies];
+	struct flow_entry *fe_arr[num_policies];
+
+	for (i = 0; i < num_policies; i++) {
+		flow_hash_val_arr[i] = policies[i]->flow_hash_val;
+		flow_arr[i] = &policies[i]->flow;
+	}
+
+	done_lookups = 0;
+	while (done_lookups < num_policies) {
+		uint32_t num_keys = num_policies - done_lookups;
+		if (num_keys > RTE_HASH_LOOKUP_BULK_MAX)
+			num_keys = RTE_HASH_LOOKUP_BULK_MAX;
+
+		ret = rte_hash_lookup_bulk_with_hash(
+			instance->ip_flow_hash_table,
+			(const void **)&flow_arr[done_lookups],
+			(hash_sig_t *)&flow_hash_val_arr[done_lookups],
+			num_keys, &pos_arr[done_lookups]);
+		if (ret != 0) {
+			GK_LOG(NOTICE,
+				"failed to find multiple keys in the hash table at lcore %u\n",
+				rte_lcore_id());
+		}
+
+		done_lookups += num_keys;
+	}
+
+	for (i = 0; i < num_policies; i++) {
+		if (pos_arr[i] >= 0) {
+			fe_arr[i] = &instance->ip_flow_entry_table[pos_arr[i]];
+
+			prefetch_flow_entry(fe_arr[i]);
+		} else {
+			fe_arr[i] = NULL;
+			if (flow_arr[i]->proto == RTE_ETHER_TYPE_IPV4) {
+				lpm_lookup_pos[num_lpm_lookups] = i;
+				flows[num_lpm_lookups] = flow_arr[i];
+				num_lpm_lookups++;
+			} else {
+				lpm6_lookup_pos[num_lpm6_lookups] = i;
+				flows6[num_lpm6_lookups] = flow_arr[i];
+				num_lpm6_lookups++;
+			}
+		}
+	}
+
+	/* The remaining flows need LPM lookups. */
+	lookup_fib_bulk(&gk_conf->lpm_tbl, flows, num_lpm_lookups, fibs);
+	lookup_fib6_bulk(&gk_conf->lpm_tbl, flows6, num_lpm6_lookups, fibs6);
+
+	for (i = 0; i < num_lpm_lookups; i++) {
+		int fidx = lpm_lookup_pos[i];
+
+		/*
+		 * The function add_ggu_policy() only fills up
+		 * GK_GRANTED and GK_DECLINED states. So, it doesn't
+		 * need to call initialize_flow_entry().
+		 */
+		fe_arr[fidx] = add_new_flow_from_policy(fibs[i],
+			policies[fidx], instance, flow_hash_val_arr[fidx]);
+	}
+
+	for (i = 0; i < num_lpm6_lookups; i++) {
+		int fidx = lpm6_lookup_pos[i];
+
+		fe_arr[fidx] = add_new_flow_from_policy(fibs6[i],
+			policies[fidx], instance, flow_hash_val_arr[fidx]);
+	}
+
+	for (i = 0; i < num_policies; i++) {
+		struct flow_entry *fe = fe_arr[i];
+		struct ggu_policy *policy = policies[i];
+
+		if (fe == NULL)
+			continue;
+
+		switch (policy->state) {
+		case GK_GRANTED:
+			fe->state = GK_GRANTED;
+			fe->u.granted.cap_expire_at = now +
+				policy->params.granted.cap_expire_sec *
+				cycles_per_sec;
+			fe->u.granted.tx_rate_kib_cycle =
+				policy->params.granted.tx_rate_kib_sec;
+			fe->u.granted.send_next_renewal_at = now +
+				policy->params.granted.next_renewal_ms *
+				cycles_per_ms;
+			fe->u.granted.renewal_step_cycle =
+				policy->params.granted.renewal_step_ms *
+				cycles_per_ms;
+			fe->u.granted.budget_renew_at = now + cycles_per_sec;
+			fe->u.granted.budget_byte =
+				(uint64_t)fe->u.granted.tx_rate_kib_cycle *
+				1024;
+			break;
+
+		case GK_DECLINED:
+			fe->state = GK_DECLINED;
+			fe->u.declined.expire_at = now +
+				policy->params.declined.expire_sec *
+				cycles_per_sec;
+			break;
+
+		case GK_BPF:
+			fe->state = GK_BPF;
+			fe->u.bpf.expire_at = now +
+				policy->params.bpf.expire_sec * cycles_per_sec;
+			fe->u.bpf.program_index =
+				policy->params.bpf.program_index;
+			fe->u.bpf.cookie = policy->params.bpf.cookie;
+			break;
+
+		default:
+			GK_LOG(ERR, "Unknown flow state %u\n", policy->state);
+			break;
+		}
+	}
+
+	instance->num_policies = 0;
+}
+
+static void
 process_cmds_from_mailbox(
 	struct gk_instance *instance, struct gk_config *gk_conf)
 {
@@ -2111,10 +2197,14 @@ process_cmds_from_mailbox(
         num_cmd = mb_dequeue_burst(&instance->mb,
 		(void **)gk_cmds, mailbox_burst_size);
 
-        for (i = 0; i < num_cmd; i++) {
-		process_gk_cmd(gk_cmds[i], instance, gk_conf);
+        for (i = 0; i < num_cmd; i++)
+		process_gk_cmd(gk_cmds[i], instance);
+
+	if (!instance->has_insertion_failed)
+		add_ggu_policy_bulk(instance, gk_conf);
+
+        for (i = 0; i < num_cmd; i++)
 		mb_free_entry(&instance->mb, gk_cmds[i]);
-        }
 }
 
 static int
@@ -2255,6 +2345,9 @@ cleanup_gk(struct gk_config *gk_conf)
 			destroy_acl_search(gk_conf->instances[i].acl4);
 		if (gk_conf->instances[i].acl6 != NULL)
 			destroy_acl_search(gk_conf->instances[i].acl6);
+
+		if (gk_conf->instances[i].policies != NULL)
+			rte_free(gk_conf->instances[i].policies);
 
 		destroy_mailbox(&gk_conf->instances[i].mb);
 	}

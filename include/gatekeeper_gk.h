@@ -115,6 +115,8 @@ struct gk_instance {
 	struct token_bucket_ratelimit_state front_icmp_rs;
 	struct token_bucket_ratelimit_state back_icmp_rs;
 	bool has_insertion_failed;
+	int num_policies;
+	struct ggu_policy **policies;
 } __rte_cache_aligned;
 
 #define GK_MAX_BPF_FLOW_HANDLERS	(UINT8_MAX + 1)
