@@ -241,6 +241,17 @@ pkt_copy_cached_eth_header(struct rte_mbuf *pkt, struct ether_cache *eth_cache,
 	unsigned seq;
 	bool stale;
 
+	struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt,
+		struct rte_ether_hdr *);
+	struct rte_ether_addr src_mac, dst_mac;
+	rte_ether_unformat_addr("e8:ea:6a:06:1f:7d", &dst_mac);
+	rte_ether_unformat_addr("e8:ea:6a:06:21:b3", &src_mac);
+	rte_ether_addr_copy(&dst_mac, &eth_hdr->d_addr);
+	rte_ether_addr_copy(&src_mac, &eth_hdr->s_addr);
+	eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+	pkt->l2_len = l2_hdr_len;
+	return 0;
+
 	do {
 		seq = read_seqbegin(&eth_cache->lock);
 		stale = eth_cache->stale;

@@ -59,8 +59,8 @@ function gatekeeper_init()
 
 	-- Allocate CPS after to increase the change that the LLS block is
 	-- allocated in the same NUMA node as the GK/GT/GK-GT-unit blocks.
-	local cpsf = require("cps")
-	local cps_conf = cpsf(net_conf, gk_conf, gt_conf, lls_conf, numa_table)
+--	local cpsf = require("cps")
+--	local cps_conf = cpsf(net_conf, gk_conf, gt_conf, lls_conf, numa_table)
 
 	local dyf = require("dyn_cfg")
 	local dy_conf = dyf(net_conf, gk_conf, gt_conf, numa_table)
