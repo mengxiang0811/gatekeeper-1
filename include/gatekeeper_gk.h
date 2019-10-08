@@ -360,7 +360,7 @@ int gk_conf_put(struct gk_config *gk_conf);
 int run_gk(struct net_config *net_conf, struct gk_config *gk_conf,
 	struct sol_config *sol_conf);
 struct mailbox *get_responsible_gk_mailbox(
-	const struct ip_flow *flow, const struct gk_config *gk_conf);
+	uint32_t flow_hash_val, const struct gk_config *gk_conf);
 
 int gk_flush_flow_table(const char *src_prefix,
 	const char *dst_prefix, struct gk_config *gk_conf);

@@ -53,6 +53,7 @@ filter_name(const struct gatekeeper_if *iface)
 static void
 process_single_policy(struct ggu_policy *policy, void *arg)
 {
+	uint32_t flow_hash_val = rss_ip_flow_hf(&policy->flow, 0, 0);
 	const struct ggu_config *ggu_conf = arg;
 	struct gk_cmd_entry *entry;
 	/*
@@ -60,7 +61,7 @@ process_single_policy(struct ggu_policy *policy, void *arg)
 	 * and send the policy decision to the GK block.
 	 */
 	struct mailbox *mb =
-		get_responsible_gk_mailbox(&policy->flow, ggu_conf->gk);
+		get_responsible_gk_mailbox(flow_hash_val, ggu_conf->gk);
 
 	if (mb == NULL)
 		return;
@@ -72,6 +73,7 @@ process_single_policy(struct ggu_policy *policy, void *arg)
 	entry->op = GK_ADD_POLICY_DECISION;
 	entry->u.ggu.state = policy->state;
 	rte_memcpy(&entry->u.ggu.flow, &policy->flow, sizeof(entry->u.ggu.flow));
+	entry->u.ggu.flow_hash_val = flow_hash_val;
 
 	switch (policy->state) {
 	case GK_GRANTED:

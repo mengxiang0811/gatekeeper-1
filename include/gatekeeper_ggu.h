@@ -232,6 +232,7 @@ struct ggu_bpf {
 struct ggu_policy {
 	uint8_t state;
 	struct ip_flow flow;
+	uint32_t flow_hash_val;
 
 	/*
 	 * The policy decision sent to a GK block must have
