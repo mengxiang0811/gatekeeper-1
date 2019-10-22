@@ -1386,22 +1386,17 @@ lookup_fib_bulk(struct gk_lpm *ltbl, struct ip_flow **flows,
 		rte_lpm_lookupx4(ltbl->lpm, dip, dst.u32, default_nh);
 
 		for (j = 0; j < FWDSTEP; j++) {
-			if (dst.u32[j] != default_nh) {
+			if (dst.u32[j] != default_nh)
 				fibs[i + j] = &ltbl->fib_tbl[dst.u32[j]];
-
-				rte_prefetch0(fibs[i + j]);
-			} else
+			else
 				fibs[i + j] = NULL;
 		}
 	}
 
 	RTE_VERIFY(i == k);
 
-	for (; i < num_flows; i++) {
+	for (; i < num_flows; i++)
 		fibs[i] = look_up_fib(ltbl, flows[i]);
-		if (fibs[i])
-			rte_prefetch0(fibs[i]);
-	}
 }
 
 static void
@@ -1422,11 +1417,9 @@ lookup_fib6_bulk(struct gk_lpm *ltbl, struct ip_flow **flows,
 	rte_lpm6_lookup_bulk_func(ltbl->lpm6, dst_ip, hop, num_flows);
 
 	for (i = 0; i < num_flows; i++) {
-		if (hop[i] != -1) {
+		if (hop[i] != -1)
 			fibs[i] = &ltbl->fib_tbl6[hop[i]];
-
-			rte_prefetch0(fibs[i]);
-		} else
+		else
 			fibs[i] = NULL;
 	}
 }
@@ -1695,7 +1688,22 @@ parse_packet(struct ipacket *packet, struct rte_mbuf *pkt,
 	(*num_ip_flows)++;
 }
 
-#define PREFETCH_OFFSET (4)
+#define PREFETCH_OFFSET      (4)
+#define FIB_PREFETCH_OFFSET  (32)
+#define FLOW_PREFETCH_OFFSET (32)
+
+static inline void
+prefetch0_128_bytes(void *pointer)
+{
+#if RTE_CACHE_LINE_SIZE == 64
+	rte_prefetch0(pointer);
+	rte_prefetch0(((char *)pointer) + RTE_CACHE_LINE_SIZE);
+#elif RTE_CACHE_LINE_SIZE == 128
+	rte_prefetch0(pointer);
+#else
+#error "Unsupported cache line size"
+#endif
+}
 
 /* Process the packets on the front interface. */
 static void
@@ -1801,11 +1809,9 @@ process_pkts_front(uint16_t port_front, uint16_t port_back,
 	}
 
 	for (i = 0; i < num_ip_flows; i++) {
-		if (pos_arr[i] >= 0) {
+		if (pos_arr[i] >= 0)
 			fe_arr[i] = &instance->ip_flow_entry_table[pos_arr[i]];
-
-			prefetch_flow_entry(fe_arr[i]);
-		} else {
+		else {
 			fe_arr[i] = NULL;
 			if (flow_arr[i]->proto == RTE_ETHER_TYPE_IPV4) {
 				lpm_lookup_pos[num_lpm_lookups] = i;
@@ -1823,7 +1829,27 @@ process_pkts_front(uint16_t port_front, uint16_t port_back,
 	lookup_fib_bulk(&gk_conf->lpm_tbl, flows, num_lpm_lookups, fibs);
 	lookup_fib6_bulk(&gk_conf->lpm_tbl, flows6, num_lpm6_lookups, fibs6);
 
-	for (i = 0; i < num_lpm_lookups; i++) {
+	for (i = 0; i < FIB_PREFETCH_OFFSET && i < num_lpm_lookups; i++) {
+		rte_prefetch0(&lpm_lookup_pos[i]);
+		if (fibs[i])
+			rte_prefetch0(fibs[i]);
+	}
+
+	for (i = 0; i < (num_lpm_lookups - FIB_PREFETCH_OFFSET); i++) {
+		int idx = i + FIB_PREFETCH_OFFSET;
+		int fidx = lpm_lookup_pos[i];
+
+		rte_prefetch0(&lpm_lookup_pos[idx]);
+		if (fibs[idx])
+			rte_prefetch0(fibs[idx]);
+
+		fe_arr[fidx] = lookup_fe_from_lpm(&pkt_arr[fidx],
+			flow_hash_val_arr[fidx], fibs[i], &num_tx, tx_bufs,
+			acl4, acl6, num_pkts, icmp_bufs, req_bufs, req_prio,
+			&num_reqs, front, back, instance, gk_conf);
+	}
+
+	for (; i < num_lpm_lookups; i++) {
 		int fidx = lpm_lookup_pos[i];
 
 		fe_arr[fidx] = lookup_fe_from_lpm(&pkt_arr[fidx],
@@ -1832,7 +1858,27 @@ process_pkts_front(uint16_t port_front, uint16_t port_back,
 			&num_reqs, front, back, instance, gk_conf);
 	}
 
-	for (i = 0; i < num_lpm6_lookups; i++) {
+	for (i = 0; i < FIB_PREFETCH_OFFSET && i < num_lpm6_lookups; i++) {
+		rte_prefetch0(&lpm6_lookup_pos[i]);
+		if (fibs6[i])
+			rte_prefetch0(fibs6[i]);
+	}
+
+	for (i = 0; i < (num_lpm6_lookups - FIB_PREFETCH_OFFSET); i++) {
+		int idx = i + FIB_PREFETCH_OFFSET;
+		int fidx = lpm6_lookup_pos[i];
+
+		rte_prefetch0(&lpm6_lookup_pos[idx]);
+		if (fibs6[idx])
+			rte_prefetch0(fibs6[idx]);
+
+		fe_arr[fidx] = lookup_fe_from_lpm(&pkt_arr[fidx],
+			flow_hash_val_arr[fidx], fibs6[i], &num_tx, tx_bufs,
+			acl4, acl6, num_pkts, icmp_bufs, req_bufs, req_prio,
+			&num_reqs, front, back, instance, gk_conf);
+	}
+
+	for (; i < num_lpm6_lookups; i++) {
 		int fidx = lpm6_lookup_pos[i];
 
 		fe_arr[fidx] = lookup_fe_from_lpm(&pkt_arr[fidx],
@@ -1841,7 +1887,36 @@ process_pkts_front(uint16_t port_front, uint16_t port_back,
 			&num_reqs, front, back, instance, gk_conf);
 	}
 
-	for (i = 0; i < num_ip_flows; i++) {
+	for (i = 0; i < FLOW_PREFETCH_OFFSET && i < num_ip_flows; i++) {
+		if (fe_arr[i])
+			prefetch_flow_entry(fe_arr[i]);
+		prefetch0_128_bytes(pkt_arr[i].pkt);
+	}
+
+	for (i = 0; i < (num_ip_flows - FLOW_PREFETCH_OFFSET); i++) {
+		int idx = i + FLOW_PREFETCH_OFFSET;
+		if (fe_arr[idx])
+			prefetch_flow_entry(fe_arr[idx]);
+		prefetch0_128_bytes(pkt_arr[idx].pkt);
+
+		if (fe_arr[i] == NULL)
+			continue;
+
+		ret = process_flow_entry(fe_arr[i], &pkt_arr[i], req_bufs,
+			req_prio, &num_reqs, gk_conf, stats);
+		if (ret < 0)
+			drop_packet_front(pkt_arr[i].pkt, instance);
+		else if (ret == EINPROGRESS) {
+			/* Request will be serviced by another lcore. */
+			continue;
+		} else if (likely(ret == 0))
+			tx_bufs[num_tx++] = pkt_arr[i].pkt;
+		else
+			rte_panic("Invalid return value (%d) from processing a packet in a flow with state %d",
+				ret, fe_arr[i]->state);
+	}
+
+	for (; i < num_ip_flows; i++) {
 		if (fe_arr[i] == NULL)
 			continue;
 
