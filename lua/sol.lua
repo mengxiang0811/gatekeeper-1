@@ -23,7 +23,7 @@ return function (net_conf, lcore)
 	-- End configuration of SOL block.
 	--
 
-	local sol_conf = staticlib.c.alloc_sol_conf()
+	local sol_conf = staticlib.c.alloc_sol_conf(lcore)
 	if sol_conf == nil then
 		error("Failed to allocate sol_conf")
 	end

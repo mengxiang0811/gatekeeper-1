@@ -23,7 +23,7 @@ return function (net_conf, gk_conf, lcore)
 	-- End configuration of GGU block.
 	--
 
-	local ggu_conf = staticlib.c.alloc_ggu_conf()
+	local ggu_conf = staticlib.c.alloc_ggu_conf(lcore)
 	if ggu_conf == nil then
 		error("Failed to allocate ggu_conf")
 	end
